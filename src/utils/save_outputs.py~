@@ -1,0 +1,17 @@
+import json
+import numpy as np
+from pathlib import Path
+
+
+def save_mask(mask, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(output_path, mask)
+
+
+def save_metrics(metrics, output_path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w") as f:
+        json.dump(metrics, f, indent=4)

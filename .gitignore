@@ -205,3 +205,37 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment
+.env
+venv/
+.venv/
+
+# Large geospatial/data files
+*.tif
+*.tiff
+*.gpkg
+*.shp
+*.dbf
+*.prj
+*.cpg
+*.npz
+
+# Model files
+models/
+*.h5
+*.keras
+
+# Full datasets
+data/full_dataset/
+patches_25m_balanced/
+non_ignition_patches_25m/
+
+# OS
+.DS_Store
+Thumbs.db

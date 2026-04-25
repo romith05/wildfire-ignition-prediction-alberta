@@ -1,0 +1,7 @@
+{
+  "pixel_precision": 0.19974,
+  "pixel_recall": 0.94459,
+  "pixel_fp_rate": 0.00046,
+  "patch_recall": 0.94487,
+  "patch_fp_rate": 0.23539
+}

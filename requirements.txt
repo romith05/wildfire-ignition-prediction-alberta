@@ -1,0 +1,12 @@
+numpy
+pandas
+tensorflow
+torch
+albumentations
+scikit-learn
+matplotlib
+rasterio
+geopandas
+shapely
+pyproj
+tqdm

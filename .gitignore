@@ -224,7 +224,7 @@ venv/
 *.dbf
 *.prj
 *.cpg
-*.npz
+
 
 # Model files
 models/

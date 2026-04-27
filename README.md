@@ -78,6 +78,7 @@ The model is evaluated on fully unseen test data (2021–2023).
 -  Moderate patch FP is acceptable due to two-stage filtering
 #### Pipeline Flow
 #### Sample Outputs
+![Alt Text](results/plots/sample 1.png)
 #### Dataset Note
 #### Future Work
 - Temporal modeling (multi-day weather sequences)

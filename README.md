@@ -77,9 +77,13 @@ The model is evaluated on fully unseen test data (2021–2023).
 -  Extremely low pixel FP rate ensures clean spatial predictions
 -  Moderate patch FP is acceptable due to two-stage filtering
 #### Pipeline Flow
+![Alt Text](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/wildfire_pipeline.jpg)
 #### Sample Outputs
-![Alt Text](results/plots/sample 1.png)
+![Alt Text](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/sample%201.png)
+![Alt Text](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/sample%202.png)
+![Alt Text](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/sample%203.png)
 #### Dataset Note
+Full dataset is not included due to size.
 #### Future Work
 - Temporal modeling (multi-day weather sequences)
 - Real-time API integration (Meteostat / ECCC)

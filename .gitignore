@@ -228,7 +228,6 @@ venv/
 
 # Model files
 models/
-*.h5
 *.keras
 
 # Full datasets

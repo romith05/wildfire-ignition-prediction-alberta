@@ -3,7 +3,7 @@
 
 ###  Overview
 
-Wildfires in Canada are increasing in frequency, intensity, and economic impact. Early detection of wildfire ignition probability is critical for effective response and mitigation.
+Wildfires in Canada are increasing in frequency, intensity, and economic impact. Early rosk prediction of wildfire ignition probability is critical for effective response and mitigation.
 
 This project presents a two-stage deep learning pipeline that predicts wildfire ignition risk at 25m spatial resolution using geospatial and meteorological data.
 

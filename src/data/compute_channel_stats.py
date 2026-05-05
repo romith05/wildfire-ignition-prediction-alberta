@@ -35,8 +35,8 @@ def find_npz_files(data_dir: str | Path, pattern: str = DEFAULT_PATTERN) -> list
 
 
 def get_feature_keys(npz_file: np.lib.npyio.NpzFile, label_key: str) -> list[str]:
-    """Return feature keys, excluding the label key."""
-    return [key for key in npz_file.files if key != label_key]
+    """Return sorted feature keys, excluding the label key."""
+    return sorted([key for key in npz_file.files if key != label_key])
 
 
 def load_feature_stack(
@@ -89,11 +89,7 @@ def update_running_stats(
     count: int,
     X: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    """Update channel-wise running mean and variance accumulators.
-
-    Uses a batch-wise version of Welford/parallel variance, matching the notebook
-    approach but packaged for reuse as a CLI utility.
-    """
+    """Update channel-wise running mean and variance accumulators."""
     flat = X.reshape(-1, X.shape[-1])
     batch_count = flat.shape[0]
     batch_mean = flat.mean(axis=0)
@@ -118,19 +114,7 @@ def compute_channel_stats(
     max_files: int | None = 300,
     std_floor: float = DEFAULT_STD_FLOOR,
 ) -> dict:
-    """Compute per-channel mean/std for NPZ patch features.
-
-    Args:
-        data_dir: Folder containing ``patch_*.npz`` files.
-        label_key: NPZ key used for the ignition mask/label.
-        pattern: Glob pattern for patch files.
-        max_files: Maximum number of files to scan. Use ``None`` to scan all files.
-        std_floor: Minimum allowed std. This prevents unstable scaling for nearly
-            constant channels.
-
-    Returns:
-        Dictionary with mean/std lists plus metadata.
-    """
+    """Compute per-channel mean/std for NPZ patch features."""
     files = find_npz_files(data_dir, pattern=pattern)
     if max_files is not None:
         files = files[: max(0, min(max_files, len(files)))]

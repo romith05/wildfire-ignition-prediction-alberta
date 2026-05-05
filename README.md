@@ -64,7 +64,7 @@ Dataset includes:
 
 ### Results
 The model is evaluated on fully unseen test data (2021–2023).
-| Category | Features | 
+| Metric | Value | 
 |-------|--------|
 | Patch Recall | ~0.945 |
 | Pixel Recall | ~0.944 |
@@ -77,7 +77,7 @@ The model is evaluated on fully unseen test data (2021–2023).
 -  Extremely low pixel FP rate ensures clean spatial predictions
 -  Moderate patch FP is acceptable due to two-stage filtering
 #### Pipeline Flow
-![Alt Text](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/wildfire_pipeline.jpg)
+![Two stage Pipeline](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/wildfire_pipeline.jpg)
 #### Sample Outputs
 ![Alt Text](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/sample%201.png)
 ![Alt Text](https://github.com/romith05/wildfire-ignition-prediction-alberta/blob/main/results/plots/sample%202.png)

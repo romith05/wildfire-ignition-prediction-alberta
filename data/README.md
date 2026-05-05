@@ -1,7 +1,7 @@
 # Data
 
 The full wildfire ignition dataset is not included because of size constraints.
-
+Full geospatial datasets, generated patch files, and trained model weights are not included in this repository due to size, licensing, and research-control considerations.
 This project uses 64×64×17 geospatial patches generated from:
 
 - Alberta wildfire ignition records

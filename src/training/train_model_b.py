@@ -52,7 +52,11 @@ def train_model_b(args):
     train_gen = KerasNPZGenerator(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_gen = KerasNPZGenerator(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-    model = unet_deep(input_shape=(64, 64, 17))
+    input_shape = (args.patch_size, args.patch_size, train_dataset.C)
+    print(f"Model B input shape: {input_shape}")
+    print(f"Model B patch resolution: {args.resolution_m} m")
+
+    model = unet_deep(input_shape=input_shape)
 
     model.compile(
         optimizer="adam",
@@ -101,11 +105,13 @@ def main():
 
     parser.add_argument("--train-dir", required=True)
     parser.add_argument("--val-dir", required=True)
-    parser.add_argument("--output-model", default="models/model_B_gatekeeper.keras")
+    parser.add_argument("--output-model", default="models/model_B_1km_gatekeeper.keras")
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--channel-stats", default=None, help="Optional channel_stats.json path.")
     parser.add_argument("--label-key", default="class", help="NPZ label/mask key.")
+    parser.add_argument("--patch-size", type=int, default=64, help="Patch height/width in pixels.")
+    parser.add_argument("--resolution-m", type=int, default=1000, help="Patch pixel resolution in metres.")
 
     args = parser.parse_args()
     train_model_b(args)

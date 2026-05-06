@@ -34,6 +34,14 @@ def load_channel_stats(path):
     return stats
 
 
+def infer_input_shape(dataset):
+    """Infer model input shape directly from the first dataset sample."""
+    sample_x, _ = dataset[0]
+    if sample_x.ndim != 3:
+        raise ValueError(f"Expected sample X shape (H, W, C), got {sample_x.shape}")
+    return tuple(sample_x.shape)
+
+
 def train_model_b(args):
     channel_stats = load_channel_stats(args.channel_stats)
 
@@ -49,10 +57,22 @@ def train_model_b(args):
         channel_stats=channel_stats,
     )
 
+    input_shape = infer_input_shape(train_dataset)
+    val_input_shape = infer_input_shape(val_dataset)
+    if val_input_shape != input_shape:
+        raise ValueError(
+            f"Train/val input shape mismatch. Train: {input_shape}, Val: {val_input_shape}"
+        )
+
+    if args.patch_size is not None and args.patch_size != input_shape[0]:
+        print(
+            f"Warning: --patch-size={args.patch_size} but detected patch height={input_shape[0]}. "
+            "Using detected input shape."
+        )
+
     train_gen = KerasNPZGenerator(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_gen = KerasNPZGenerator(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-    input_shape = (args.patch_size, args.patch_size, train_dataset.C)
     print(f"Model B input shape: {input_shape}")
     print(f"Model B patch resolution: {args.resolution_m} m")
 
@@ -110,7 +130,12 @@ def main():
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--channel-stats", default=None, help="Optional channel_stats.json path.")
     parser.add_argument("--label-key", default="class", help="NPZ label/mask key.")
-    parser.add_argument("--patch-size", type=int, default=64, help="Patch height/width in pixels.")
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        default=None,
+        help="Optional expected patch height/width. The actual model shape is inferred from data.",
+    )
     parser.add_argument("--resolution-m", type=int, default=1000, help="Patch pixel resolution in metres.")
 
     args = parser.parse_args()

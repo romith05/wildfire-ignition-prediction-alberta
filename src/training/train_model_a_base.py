@@ -27,35 +27,59 @@ from src.training.metrics import pixel_precision, pixel_recall, pixel_fp_rate
 
 
 class IgnitionOnlyDataset:
-    """Dataset wrapper that keeps only patches containing ignition pixels.
+    """Dataset wrapper that keeps only ignition patches.
 
-    This is required when the source folder is balanced and contains both
-    ignition and no-ignition patches. The base U-Net must be trained only on
-    ignition patches before it is used to initialize Model B.
+    Preferred selection uses the filename token from generated patches, for
+    example ``patch_20803_ignition_EWF057_20210603.npZ``. This avoids relying
+    only on the mask when the source folder is balanced. A label-mask fallback
+    remains available for older patch names.
     """
 
-    def __init__(self, base_dataset: NPZPatchDataset, label_key: str = "class"):
+    def __init__(
+        self,
+        base_dataset: NPZPatchDataset,
+        label_key: str = "class",
+        positive_name_token: str = "_ignition_",
+        use_mask_fallback: bool = True,
+    ):
         self.base_dataset = base_dataset
         self.label_key = label_key
+        self.positive_name_token = positive_name_token.lower()
+        self.use_mask_fallback = use_mask_fallback
         self.valid_files = []
         self.source_indices = []
+        self.filename_selected = 0
+        self.mask_selected = 0
 
         for idx, file_path in enumerate(base_dataset.valid_files):
-            try:
-                with np.load(file_path) as arrs:
-                    if label_key not in arrs.files:
-                        continue
-                    y = arrs[label_key]
-                    if np.nanmax(y) > 0:
-                        self.valid_files.append(file_path)
-                        self.source_indices.append(idx)
-            except Exception as exc:
-                print(f"Skipping unreadable patch while filtering ignition-only data: {file_path} | {exc}")
+            file_name = Path(file_path).name.lower()
+            selected_by_name = self.positive_name_token in file_name
+            selected_by_mask = False
+
+            if not selected_by_name and self.use_mask_fallback:
+                try:
+                    with np.load(file_path) as arrs:
+                        if label_key in arrs.files:
+                            selected_by_mask = bool(np.nanmax(arrs[label_key]) > 0)
+                except Exception as exc:
+                    print(
+                        "Skipping unreadable patch while filtering ignition-only data: "
+                        f"{file_path} | {exc}"
+                    )
+
+            if selected_by_name or selected_by_mask:
+                self.valid_files.append(file_path)
+                self.source_indices.append(idx)
+                if selected_by_name:
+                    self.filename_selected += 1
+                elif selected_by_mask:
+                    self.mask_selected += 1
 
         if not self.source_indices:
             raise ValueError(
                 "No ignition patches found after filtering. "
-                "Check that the label key is correct and that the folder contains positive patches."
+                f"Checked filename token '{positive_name_token}'"
+                + (" and label-mask fallback." if self.use_mask_fallback else ".")
             )
 
         self.feature_keys = base_dataset.feature_keys
@@ -64,6 +88,8 @@ class IgnitionOnlyDataset:
         print("Ignition-only filter applied")
         print(f"Source patches: {len(base_dataset)}")
         print(f"Ignition patches kept: {len(self.source_indices)}")
+        print(f"Selected by filename token '{positive_name_token}': {self.filename_selected}")
+        print(f"Selected by label-mask fallback: {self.mask_selected}")
 
     def __len__(self):
         return len(self.source_indices)
@@ -147,8 +173,18 @@ def train_model_a_base(args: argparse.Namespace) -> None:
     )
 
     if args.ignition_only:
-        train_dataset = IgnitionOnlyDataset(train_dataset_all, label_key=args.label_key)
-        val_dataset = IgnitionOnlyDataset(val_dataset_all, label_key=args.label_key)
+        train_dataset = IgnitionOnlyDataset(
+            train_dataset_all,
+            label_key=args.label_key,
+            positive_name_token=args.positive_name_token,
+            use_mask_fallback=args.use_mask_fallback,
+        )
+        val_dataset = IgnitionOnlyDataset(
+            val_dataset_all,
+            label_key=args.label_key,
+            positive_name_token=args.positive_name_token,
+            use_mask_fallback=args.use_mask_fallback,
+        )
     else:
         print("Warning: --no-ignition-only was set. Base Model A will train on all patches.")
         train_dataset = train_dataset_all
@@ -235,6 +271,24 @@ def parse_args() -> argparse.Namespace:
         dest="ignition_only",
         action="store_false",
         help="Disable positive-patch filtering. Not recommended for base Model A.",
+    )
+    parser.add_argument(
+        "--positive-name-token",
+        default="_ignition_",
+        help="Filename token used to identify positive ignition patches.",
+    )
+    parser.add_argument(
+        "--use-mask-fallback",
+        dest="use_mask_fallback",
+        action="store_true",
+        default=True,
+        help="If filename token is absent, fall back to checking whether the label mask has positive pixels.",
+    )
+    parser.add_argument(
+        "--no-mask-fallback",
+        dest="use_mask_fallback",
+        action="store_false",
+        help="Use filename-token filtering only.",
     )
     return parser.parse_args()
 

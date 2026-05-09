@@ -2,6 +2,7 @@ import argparse
 import json
 
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.models import load_model
 from tensorflow.keras.optimizers import Adam
 
 from src.data.dataset import NPZPatchDataset
@@ -12,12 +13,7 @@ from src.training.metrics import pixel_precision, pixel_recall, pixel_fp_rate, p
 
 
 def load_channel_stats(path):
-    """Load channel normalization statistics from JSON.
-
-    The JSON should contain at least:
-    - mean: list of per-channel means
-    - std: list of per-channel standard deviations
-    """
+    """Load channel normalization statistics from JSON."""
     if path is None:
         return None
 
@@ -26,7 +22,6 @@ def load_channel_stats(path):
 
     if "mean" not in stats or "std" not in stats:
         raise ValueError(f"Channel stats file must contain 'mean' and 'std': {path}")
-
     if len(stats["mean"]) != len(stats["std"]):
         raise ValueError(f"Mean/std length mismatch in channel stats file: {path}")
 
@@ -43,27 +38,28 @@ def infer_input_shape(dataset):
     return tuple(sample_x.shape)
 
 
+def build_model(input_shape, base_model=None):
+    """Create Model B, optionally loading weights/architecture from a saved base model."""
+    if base_model is None:
+        print("No --base-model provided. Creating a new U-Net.")
+        return unet_deep(input_shape=input_shape)
+
+    print(f"Loading base model for Model B initialization: {base_model}")
+    model = load_model(base_model, compile=False)
+    loaded_shape = tuple(model.input_shape[1:])
+    if loaded_shape != tuple(input_shape):
+        raise ValueError(
+            f"Base model input shape {loaded_shape} does not match dataset input shape {input_shape}."
+        )
+    return model
+
+
 def build_callbacks(output_model):
     """Create checkpoint/early-stop/LR callbacks for one training phase."""
     return [
-        ModelCheckpoint(
-            output_model,
-            monitor="val_loss",
-            save_best_only=True,
-            verbose=1,
-        ),
-        EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True,
-            verbose=1,
-        ),
-        ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=0.5,
-            patience=3,
-            verbose=1,
-        ),
+        ModelCheckpoint(output_model, monitor="val_loss", save_best_only=True, verbose=1),
+        EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True, verbose=1),
+        ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=3, verbose=1),
     ]
 
 
@@ -119,43 +115,35 @@ def train_simple_regimen(model, train_gen, val_gen, args):
 
 
 def train_phased_regimen(model, train_gen, val_gen, args):
-    """Run the four-phase Model B regimen from the original training notebook."""
+    """Run the four-phase Model B regimen."""
     phases = [
-        {
-            "name": "Phase 1: focal only",
-            "epochs": args.phase1_epochs,
-            "loss": focal_loss(alpha=0.90, gamma=2.50),
-        },
-        {
-            "name": "Phase 2: focal + weak patch suppression",
-            "epochs": args.phase2_epochs,
-            "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.10),
-        },
-        {
-            "name": "Phase 3: focal + strong patch suppression",
-            "epochs": args.phase3_epochs,
-            "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.50),
-        },
-        {
-            "name": "Phase 4: recall-optimized suppression",
-            "epochs": args.phase4_epochs,
-            "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.30),
-        },
+        ("Phase 1: focal only", args.phase1_epochs, focal_loss(alpha=0.90, gamma=2.50)),
+        (
+            "Phase 2: focal + weak patch suppression",
+            args.phase2_epochs,
+            combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.10),
+        ),
+        (
+            "Phase 3: focal + strong patch suppression",
+            args.phase3_epochs,
+            combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.50),
+        ),
+        (
+            "Phase 4: recall-optimized suppression",
+            args.phase4_epochs,
+            combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.30),
+        ),
     ]
 
-    for phase in phases:
-        compile_model(
-            model=model,
-            loss_fn=phase["loss"],
-            learning_rate=args.learning_rate,
-        )
+    for phase_name, epochs, loss_fn in phases:
+        compile_model(model=model, loss_fn=loss_fn, learning_rate=args.learning_rate)
         fit_phase(
             model=model,
             train_gen=train_gen,
             val_gen=val_gen,
             output_model=args.output_model,
-            phase_name=phase["name"],
-            epochs=phase["epochs"],
+            phase_name=phase_name,
+            epochs=epochs,
         )
 
 
@@ -167,7 +155,6 @@ def train_model_b(args):
         label_key=args.label_key,
         channel_stats=channel_stats,
     )
-
     val_dataset = NPZPatchDataset(
         folder=args.val_dir,
         label_key=args.label_key,
@@ -194,7 +181,7 @@ def train_model_b(args):
     print(f"Model B patch resolution: {args.resolution_m} m")
     print(f"Model B training regimen: {args.training_regimen}")
 
-    model = unet_deep(input_shape=input_shape)
+    model = build_model(input_shape=input_shape, base_model=args.base_model)
 
     if args.training_regimen == "simple":
         train_simple_regimen(model, train_gen, val_gen, args)
@@ -213,6 +200,7 @@ def main():
     parser.add_argument("--train-dir", required=True)
     parser.add_argument("--val-dir", required=True)
     parser.add_argument("--output-model", default="models/model_B_1km_gatekeeper.keras")
+    parser.add_argument("--base-model", default=None, help="Optional saved base Model A used to initialize Model B.")
     parser.add_argument("--epochs", type=int, default=20, help="Epochs for --training-regimen simple.")
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--channel-stats", default=None, help="Optional channel_stats.json path.")
@@ -228,7 +216,7 @@ def main():
         "--training-regimen",
         choices=["simple", "phased"],
         default="phased",
-        help="Use simple focal training or notebook-style phased Model B training.",
+        help="Use simple focal training or phased Model B training.",
     )
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--simple-alpha", type=float, default=0.85)

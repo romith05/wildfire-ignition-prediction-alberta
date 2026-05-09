@@ -26,24 +26,40 @@ from src.training.losses import focal_loss
 from src.training.metrics import pixel_precision, pixel_recall, pixel_fp_rate
 
 
-def filename_has_exact_token(file_path: str | Path, token: str) -> bool:
-    """Return True when a filename contains token as an underscore-separated field.
+def filename_is_positive_ignition(
+    file_path: str | Path,
+    positive_token: str = "ignition",
+    negative_token: str = "no_ignition",
+) -> bool:
+    """Return True only for positive ignition filenames.
 
-    This prevents false positives such as selecting ``no_ignition`` when the
-    desired positive token is ``ignition``.
+    Positive files are named like ``*_ignition_*``.
+    Negative files are named like ``*_no_ignition_*``.
+
+    A simple substring search for ``ignition`` is unsafe because
+    ``no_ignition`` also contains ``ignition``. This function rejects the
+    negative token first, then accepts the positive token.
     """
     stem = Path(file_path).stem.lower()
-    parts = [part for part in stem.split("_") if part]
-    return token.lower().strip("_") in parts
+    wrapped_stem = f"_{stem}_"
+
+    positive_marker = f"_{positive_token.lower().strip('_')}_"
+    negative_marker = f"_{negative_token.lower().strip('_')}_"
+
+    if negative_marker in wrapped_stem:
+        return False
+    return positive_marker in wrapped_stem
 
 
 class IgnitionOnlyDataset:
-    """Dataset wrapper that keeps only ignition patches.
+    """Dataset wrapper that keeps only positive ignition patches.
 
-    Preferred selection uses the filename token from generated patches, for
-    example ``patch_20803_ignition_EWF057_20210603.npZ``. This avoids relying
-    only on the mask when the source folder is balanced. A label-mask fallback
-    remains available for older patch names.
+    Preferred selection uses filename tokens from generated patches:
+    - positive: ``*_ignition_*``
+    - negative: ``*_no_ignition_*``
+
+    The negative token is rejected before the positive token is accepted. A
+    label-mask fallback remains available for older patch names.
     """
 
     def __init__(
@@ -51,11 +67,13 @@ class IgnitionOnlyDataset:
         base_dataset: NPZPatchDataset,
         label_key: str = "class",
         positive_name_token: str = "ignition",
+        negative_name_token: str = "no_ignition",
         use_mask_fallback: bool = True,
     ):
         self.base_dataset = base_dataset
         self.label_key = label_key
         self.positive_name_token = positive_name_token.lower().strip("_")
+        self.negative_name_token = negative_name_token.lower().strip("_")
         self.use_mask_fallback = use_mask_fallback
         self.valid_files = []
         self.source_indices = []
@@ -63,7 +81,11 @@ class IgnitionOnlyDataset:
         self.mask_selected = 0
 
         for idx, file_path in enumerate(base_dataset.valid_files):
-            selected_by_name = filename_has_exact_token(file_path, self.positive_name_token)
+            selected_by_name = filename_is_positive_ignition(
+                file_path,
+                positive_token=self.positive_name_token,
+                negative_token=self.negative_name_token,
+            )
             selected_by_mask = False
 
             if not selected_by_name and self.use_mask_fallback:
@@ -87,9 +109,10 @@ class IgnitionOnlyDataset:
 
         if not self.source_indices:
             raise ValueError(
-                "No ignition patches found after filtering. "
-                f"Checked exact filename token '{self.positive_name_token}'"
-                + (" and label-mask fallback." if self.use_mask_fallback else ".")
+                "No positive ignition patches found after filtering. "
+                f"Accepted token: '{self.positive_name_token}'. "
+                f"Rejected token: '{self.negative_name_token}'."
+                + (" Mask fallback was enabled." if self.use_mask_fallback else "")
             )
 
         self.feature_keys = base_dataset.feature_keys
@@ -98,7 +121,8 @@ class IgnitionOnlyDataset:
         print("Ignition-only filter applied")
         print(f"Source patches: {len(base_dataset)}")
         print(f"Ignition patches kept: {len(self.source_indices)}")
-        print(f"Selected by exact filename token '{self.positive_name_token}': {self.filename_selected}")
+        print(f"Selected by positive filename token '{self.positive_name_token}': {self.filename_selected}")
+        print(f"Rejected filename token '{self.negative_name_token}' before positive selection")
         print(f"Selected by label-mask fallback: {self.mask_selected}")
 
     def __len__(self):
@@ -187,12 +211,14 @@ def train_model_a_base(args: argparse.Namespace) -> None:
             train_dataset_all,
             label_key=args.label_key,
             positive_name_token=args.positive_name_token,
+            negative_name_token=args.negative_name_token,
             use_mask_fallback=args.use_mask_fallback,
         )
         val_dataset = IgnitionOnlyDataset(
             val_dataset_all,
             label_key=args.label_key,
             positive_name_token=args.positive_name_token,
+            negative_name_token=args.negative_name_token,
             use_mask_fallback=args.use_mask_fallback,
         )
     else:
@@ -285,7 +311,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--positive-name-token",
         default="ignition",
-        help="Exact underscore-separated filename token used to identify positive ignition patches.",
+        help="Positive filename token. Positive files are expected to contain *_ignition_*.",
+    )
+    parser.add_argument(
+        "--negative-name-token",
+        default="no_ignition",
+        help="Negative filename token to reject before positive selection. Default: no_ignition.",
     )
     parser.add_argument(
         "--use-mask-fallback",

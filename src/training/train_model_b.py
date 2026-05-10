@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+from pathlib import Path
 
 from tensorflow.keras.callbacks import ModelCheckpoint
 from tensorflow.keras.models import load_model
@@ -55,6 +56,13 @@ def build_model(input_shape, base_model=None):
     return model
 
 
+def phase_model_path(output_model, phase_number):
+    """Return a stable file path for a phase-specific checkpoint."""
+    output_path = Path(output_model)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    return output_path.with_name(f"{output_path.stem}_phase{phase_number}{output_path.suffix}")
+
+
 def checkpoint_callback(output_model):
     """Save the best model for the current phase."""
     return ModelCheckpoint(
@@ -66,7 +74,7 @@ def checkpoint_callback(output_model):
 
 
 def compile_for_phase(model, loss_fn, learning_rate):
-    """Compile exactly for a notebook-style phase."""
+    """Compile one phase with an explicit objective and learning rate."""
     opt = Adam(learning_rate=learning_rate, clipnorm=1.0)
     model.compile(
         optimizer=opt,
@@ -80,70 +88,88 @@ def compile_for_phase(model, loss_fn, learning_rate):
     )
 
 
-def fit_phase(model, train_gen, val_gen, args, phase_name, epochs):
-    """Run one fixed Model B training phase."""
-    print(f"\n{phase_name}")
+def fit_phase(model, train_gen, val_gen, args, phase_number, phase_name, phase_goal, epochs, output_path):
+    """Run one fixed Model B training phase and save its own model."""
+    print(f"\nPhase {phase_number}: {phase_name}")
+    print(f"Goal: {phase_goal}")
+    print(f"Saving best phase model to: {output_path}")
+
     model.fit(
         train_gen,
         steps_per_epoch=math.ceil(len(train_gen.dataset) / args.batch_size),
         validation_data=val_gen,
         validation_steps=math.ceil(len(val_gen.dataset) / args.batch_size),
         epochs=epochs,
-        callbacks=[checkpoint_callback(args.output_model)],
+        callbacks=[checkpoint_callback(output_path)],
         verbose=1,
     )
 
+    model.save(output_path)
+    print(f"Saved phase {phase_number} model to {output_path}")
+
 
 def train_phased_model_b(model, train_gen, val_gen, args):
-    """Run the four-phase Model B regimen from training.ipynb."""
-    compile_for_phase(
-        model,
-        loss_fn=focal_loss(alpha=0.90, gamma=2.50),
-        learning_rate=args.learning_rate,
-    )
-    fit_phase(model, train_gen, val_gen, args, "Phase 1: focal only", args.phase1_epochs)
+    """Run the four-phase patch-gatekeeper regimen.
 
-    compile_for_phase(
-        model,
-        loss_fn=combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.10),
-        learning_rate=args.learning_rate,
-    )
-    fit_phase(
-        model,
-        train_gen,
-        val_gen,
-        args,
-        "Phase 2: focal + weak patch suppression",
-        args.phase2_epochs,
-    )
+    Phase goals:
+    1. preserve ignition sensitivity from the base U-Net,
+    2. introduce weak patch-level suppression,
+    3. aggressively reduce no-ignition false activations,
+    4. recover recall while keeping suppression.
+    """
+    phases = [
+        {
+            "number": 1,
+            "name": "focal-only sensitivity warm start",
+            "goal": "Preserve base ignition recall and adapt the base model to mixed 1 km data.",
+            "epochs": args.phase1_epochs,
+            "learning_rate": args.phase1_lr,
+            "loss": focal_loss(alpha=0.90, gamma=2.50),
+        },
+        {
+            "number": 2,
+            "name": "weak patch suppression",
+            "goal": "Begin reducing no-ignition patch activations without hurting recall too much.",
+            "epochs": args.phase2_epochs,
+            "learning_rate": args.phase2_lr,
+            "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=args.phase2_lambda_patch),
+        },
+        {
+            "number": 3,
+            "name": "strong patch suppression",
+            "goal": "Push down false positive no-ignition patches and hard negatives more aggressively.",
+            "epochs": args.phase3_epochs,
+            "learning_rate": args.phase3_lr,
+            "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=args.phase3_lambda_patch),
+        },
+        {
+            "number": 4,
+            "name": "recall recovery and calibration",
+            "goal": "Relax suppression slightly to recover recall while retaining patch-level discipline.",
+            "epochs": args.phase4_epochs,
+            "learning_rate": args.phase4_lr,
+            "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=args.phase4_lambda_patch),
+        },
+    ]
 
-    compile_for_phase(
-        model,
-        loss_fn=combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.50),
-        learning_rate=args.learning_rate,
-    )
-    fit_phase(
-        model,
-        train_gen,
-        val_gen,
-        args,
-        "Phase 3: focal + strong patch suppression",
-        args.phase3_epochs,
-    )
-
-    compile_for_phase(
-        model,
-        loss_fn=combined_loss(alpha=0.90, gamma=2.50, lambda_patch=0.30),
-        learning_rate=args.learning_rate,
-    )
-    fit_phase(
-        model,
-        train_gen,
-        val_gen,
-        args,
-        "Phase 4: recall-optimized suppression",
-        args.phase4_epochs,
-    )
+    for phase in phases:
+        output_path = phase_model_path(args.output_model, phase["number"])
+        compile_for_phase(
+            model,
+            loss_fn=phase["loss"],
+            learning_rate=phase["learning_rate"],
+        )
+        fit_phase(
+            model=model,
+            train_gen=train_gen,
+            val_gen=val_gen,
+            args=args,
+            phase_number=phase["number"],
+            phase_name=phase["name"],
+            phase_goal=phase["goal"],
+            epochs=phase["epochs"],
+            output_path=output_path,
+        )
 
 
 def train_model_b(args):
@@ -178,13 +204,13 @@ def train_model_b(args):
 
     print(f"Model B input shape: {input_shape}")
     print(f"Model B patch resolution: {args.resolution_m} m")
-    print("Model B training regimen: phased only")
+    print("Model B training regimen: phased patch gatekeeper")
 
     model = build_model(input_shape=input_shape, base_model=args.base_model)
     train_phased_model_b(model, train_gen, val_gen, args)
 
     model.save(args.output_model)
-    print(f"Saved Model B to {args.output_model}")
+    print(f"Saved final Model B to {args.output_model}")
 
 
 def main():
@@ -204,11 +230,20 @@ def main():
         help="Optional expected patch height/width. The actual model shape is inferred from data.",
     )
     parser.add_argument("--resolution-m", type=int, default=1000, help="Patch pixel resolution in metres.")
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
+
     parser.add_argument("--phase1-epochs", type=int, default=3)
     parser.add_argument("--phase2-epochs", type=int, default=5)
     parser.add_argument("--phase3-epochs", type=int, default=5)
     parser.add_argument("--phase4-epochs", type=int, default=3)
+
+    parser.add_argument("--phase1-lr", type=float, default=1e-4)
+    parser.add_argument("--phase2-lr", type=float, default=7.5e-5)
+    parser.add_argument("--phase3-lr", type=float, default=5e-5)
+    parser.add_argument("--phase4-lr", type=float, default=3e-5)
+
+    parser.add_argument("--phase2-lambda-patch", type=float, default=0.10)
+    parser.add_argument("--phase3-lambda-patch", type=float, default=0.50)
+    parser.add_argument("--phase4-lambda-patch", type=float, default=0.30)
 
     args = parser.parse_args()
     train_model_b(args)

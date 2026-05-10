@@ -7,8 +7,12 @@ class KerasNPZGenerator(Sequence):
     Keras-compatible generator wrapping NPZPatchDataset.
 
     Returns:
-    X: (batch, 64, 64, C)
-    y: (batch, 64, 64, 1)
+    X: (batch, H, W, C)
+    y: (batch, H, W, 1)
+
+    This mirrors the working notebook generator by cleaning NaN/Inf values before
+    yielding each batch. That is important for raster-derived 1 km patches where
+    invalid values can otherwise produce NaN loss during Model B training.
     """
 
     def __init__(self, dataset, batch_size=16, shuffle=True):
@@ -33,10 +37,17 @@ class KerasNPZGenerator(Sequence):
 
         for idx in batch_indices:
             X, y = self.dataset[idx]
+
+            X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+            y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+
             X_batch.append(X)
             y_batch.append(y)
 
-        return np.stack(X_batch).astype("float32"), np.stack(y_batch).astype("float32")
+        X_out = np.stack(X_batch).astype("float32")
+        y_out = np.stack(y_batch).astype("float32")
+
+        return X_out, y_out
 
     def on_epoch_end(self):
         if self.shuffle:

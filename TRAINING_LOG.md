@@ -85,6 +85,42 @@ models/model_B_1km_gatekeeper.keras
 | 3 | 0.0639 at best-val-loss epoch | 0.4008 | 0.9483 | 0.1121 | Suppression likely too strong; precision degraded. |
 | 4 | 0.0562 final, 0.0485 best checkpoint | 0.3996 final, 0.3989 best checkpoint | 0.9344 final, 0.9092 best checkpoint | 0.0820 final, 0.0784 best checkpoint | Recall recovered, but precision stayed weak. |
 
+### Phase 2 Threshold Sweep Decision
+
+Decision date: 2026-05-14
+
+Selected operating point for the current Phase 2 model:
+
+```text
+model: models/model_B_1km_gatekeeper_phase2.keras
+threshold: 0.40
+```
+
+Reason:
+
+- Threshold `0.40` is the safer default gatekeeper threshold because it keeps recall higher than `0.45` while still reducing the 25 m refinement workload.
+- Threshold `0.45` remains a stricter/high-confidence option, but it misses more positive patches.
+
+Phase 2 sweep comparison:
+
+| Threshold | Patch Recall | Patch Precision | Patch FP Rate | Pass Rate | Passed Patches | TP | FP | TN | FN |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.40 | 0.9441 | 0.8848 | 0.1250 | 0.5380 | 764 | 676 | 88 | 616 | 40 |
+| 0.45 | 0.9260 | 0.8972 | 0.1080 | 0.5204 | 739 | 663 | 76 | 628 | 53 |
+
+Interpretation:
+
+```text
+Moving from 0.40 to 0.45 saves only 25 passed patches, but misses 13 additional positive patches. For a wildfire gatekeeper, the recall loss is not worth the small workload reduction at this stage.
+```
+
+Current decision:
+
+```text
+Use Phase 2 at threshold 0.40 as the default Model B gatekeeper setting for the next pipeline test.
+Keep threshold 0.45 as a stricter alternative for compute-saving experiments.
+```
+
 ### Takeaways
 
 1. Phase 1 worked as a sensitivity warm start.
@@ -92,7 +128,7 @@ models/model_B_1km_gatekeeper.keras
 3. Phase 3 appears too aggressive with `lambda_patch=0.50`.
 4. Phase 4 recovered recall but did not recover precision.
 5. Do not automatically choose the final model.
-6. Shortlist Phase 2 and Phase 4 for threshold sweep.
+6. Phase 2 threshold `0.40` is the current default operating point.
 
 ### Candidate Models To Evaluate
 
@@ -103,7 +139,7 @@ models/model_B_1km_gatekeeper_phase4.keras
 
 ### Recommended Next Evaluation
 
-Run a threshold sweep before retraining.
+Run or compare a threshold sweep for Phase 4 before retraining.
 
 Thresholds:
 

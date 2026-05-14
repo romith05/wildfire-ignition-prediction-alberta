@@ -114,11 +114,36 @@ Interpretation:
 Moving from 0.40 to 0.45 saves only 25 passed patches, but misses 13 additional positive patches. For a wildfire gatekeeper, the recall loss is not worth the small workload reduction at this stage.
 ```
 
-Current decision:
+### Phase 4 Sweep Comparison
+
+Phase 4 was also evaluated after the Phase 2 decision.
+
+Important Phase 4 points:
+
+| Threshold | Patch Recall | Patch Precision | Patch FP Rate | Pass Rate | Passed Patches | TP | FP | TN | FN |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.40 | 0.9455 | 0.8724 | 0.1406 | 0.5465 | 776 | 677 | 99 | 605 | 39 |
+| 0.45 | 0.9399 | 0.8890 | 0.1193 | 0.5331 | 757 | 673 | 84 | 620 | 43 |
+| 0.50 | 0.9358 | 0.8957 | 0.1108 | 0.5268 | 748 | 670 | 78 | 626 | 46 |
+
+Comparison against Phase 2:
 
 ```text
-Use Phase 2 at threshold 0.40 as the default Model B gatekeeper setting for the next pipeline test.
-Keep threshold 0.45 as a stricter alternative for compute-saving experiments.
+Phase 2 @ 0.40: recall 0.9441, patch FP rate 0.1250, pass rate 0.5380.
+Phase 4 @ 0.45: recall 0.9399, patch FP rate 0.1193, pass rate 0.5331.
+```
+
+Interpretation:
+
+```text
+Phase 4 @ 0.45 is a strong backup operating point. It has slightly lower recall than Phase 2 @ 0.40, but slightly lower patch false positive rate and pass rate. The tradeoff is close.
+```
+
+Current decision after reviewing Phase 4:
+
+```text
+Default operating point: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
+Backup stricter point: models/model_B_1km_gatekeeper_phase4.keras @ threshold 0.45
 ```
 
 ### Takeaways
@@ -126,9 +151,10 @@ Keep threshold 0.45 as a stricter alternative for compute-saving experiments.
 1. Phase 1 worked as a sensitivity warm start.
 2. Phase 2 gave the cleanest patch false-positive reduction.
 3. Phase 3 appears too aggressive with `lambda_patch=0.50`.
-4. Phase 4 recovered recall but did not recover precision.
+4. Phase 4 recovered recall but did not clearly beat Phase 2 at the selected operating point.
 5. Do not automatically choose the final model.
 6. Phase 2 threshold `0.40` is the current default operating point.
+7. Phase 4 threshold `0.45` is the backup stricter operating point.
 
 ### Candidate Models To Evaluate
 
@@ -139,22 +165,17 @@ models/model_B_1km_gatekeeper_phase4.keras
 
 ### Recommended Next Evaluation
 
-Run or compare a threshold sweep for Phase 4 before retraining.
-
-Thresholds:
-
-```text
-0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50
-```
+Use the selected Phase 2 model in the first coarse-to-fine pipeline test.
 
 Track:
 
 ```text
-patch recall
-patch false positive rate
-patch precision
-number of patches passed
+number of 1 km patches scanned
+number of 1 km patches passed by Model B
 percentage of coarse grid passed to 25 m refinement
+number of known ignition regions retained
+number of false coarse regions passed
+runtime reduction compared with all-25 m scanning
 ```
 
 ### Recommended Next Tuning If Retraining

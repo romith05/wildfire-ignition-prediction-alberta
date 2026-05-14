@@ -1,7 +1,9 @@
 import argparse
 import json
+from pathlib import Path
 
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.optimizers import Adam
 
 from src.data.dataset import NPZPatchDataset
 from src.data.keras_generator import KerasNPZGenerator
@@ -34,6 +36,39 @@ def load_channel_stats(path):
     return stats
 
 
+def infer_input_shape(dataset):
+    """Infer model input shape directly from the first dataset sample."""
+    sample_x, _ = dataset[0]
+    if sample_x.ndim != 3:
+        raise ValueError(f"Expected sample X shape (H, W, C), got {sample_x.shape}")
+    return tuple(sample_x.shape)
+
+
+def build_callbacks(output_model):
+    """Create stable callbacks for 25 m Model A spatial-refiner training."""
+    Path(output_model).parent.mkdir(parents=True, exist_ok=True)
+    return [
+        ModelCheckpoint(
+            output_model,
+            monitor="val_loss",
+            save_best_only=True,
+            verbose=1,
+        ),
+        EarlyStopping(
+            monitor="val_loss",
+            patience=8,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=4,
+            verbose=1,
+        ),
+    ]
+
+
 def train_model_a(args):
     channel_stats = load_channel_stats(args.channel_stats)
 
@@ -49,18 +84,31 @@ def train_model_a(args):
         channel_stats=channel_stats,
     )
 
+    input_shape = infer_input_shape(train_dataset)
+    val_input_shape = infer_input_shape(val_dataset)
+    if val_input_shape != input_shape:
+        raise ValueError(
+            f"Train/val input shape mismatch. Train: {input_shape}, Val: {val_input_shape}"
+        )
+
+    if args.patch_size is not None and args.patch_size != input_shape[0]:
+        print(
+            f"Warning: --patch-size={args.patch_size} but detected patch height={input_shape[0]}. "
+            "Using detected input shape."
+        )
+
     train_gen = KerasNPZGenerator(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_gen = KerasNPZGenerator(val_dataset, batch_size=args.batch_size, shuffle=False)
 
-    input_shape = (args.patch_size, args.patch_size, train_dataset.C)
     print(f"Model A input shape: {input_shape}")
     print(f"Model A patch resolution: {args.resolution_m} m")
+    print("Training role: 25 m spatial refiner")
 
     model = unet_deep(input_shape=input_shape)
 
     model.compile(
-        optimizer="adam",
-        loss=focal_loss(alpha=0.90, gamma=2.50),
+        optimizer=Adam(learning_rate=args.learning_rate, clipnorm=args.clipnorm),
+        loss=focal_loss(alpha=args.focal_alpha, gamma=args.focal_gamma),
         metrics=[
             pixel_precision(0.5),
             pixel_recall(0.5),
@@ -68,32 +116,11 @@ def train_model_a(args):
         ],
     )
 
-    callbacks = [
-        ModelCheckpoint(
-            args.output_model,
-            monitor="val_loss",
-            save_best_only=True,
-            verbose=1,
-        ),
-        EarlyStopping(
-            monitor="val_loss",
-            patience=5,
-            restore_best_weights=True,
-            verbose=1,
-        ),
-        ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=0.5,
-            patience=3,
-            verbose=1,
-        ),
-    ]
-
     model.fit(
         train_gen,
         validation_data=val_gen,
         epochs=args.epochs,
-        callbacks=callbacks,
+        callbacks=build_callbacks(args.output_model),
     )
 
     model.save(args.output_model)
@@ -106,12 +133,21 @@ def main():
     parser.add_argument("--train-dir", required=True)
     parser.add_argument("--val-dir", required=True)
     parser.add_argument("--output-model", default="models/model_A_25m_spatial_unet.keras")
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--channel-stats", default=None, help="Optional channel_stats.json path.")
     parser.add_argument("--label-key", default="class", help="NPZ label/mask key.")
-    parser.add_argument("--patch-size", type=int, default=64, help="Patch height/width in pixels.")
+    parser.add_argument(
+        "--patch-size",
+        type=int,
+        default=None,
+        help="Optional expected patch height/width. Actual model shape is inferred from data.",
+    )
     parser.add_argument("--resolution-m", type=int, default=25, help="Patch pixel resolution in metres.")
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--clipnorm", type=float, default=1.0)
+    parser.add_argument("--focal-alpha", type=float, default=0.90)
+    parser.add_argument("--focal-gamma", type=float, default=2.50)
 
     args = parser.parse_args()
     train_model_a(args)

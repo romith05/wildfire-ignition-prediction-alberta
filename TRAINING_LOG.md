@@ -1,10 +1,12 @@
 # Training Log
 
-This file tracks Model B gatekeeper experiments for the wildfire ignition project.
+This file tracks Model B gatekeeper and Model A spatial-refiner experiments for the wildfire ignition project.
 
 ## Goal
 
 Model B is the 1 km patch gatekeeper. It should keep ignition recall high while reducing the number of coarse patches sent to 25 m Model A refinement.
+
+Model A is the 25 m spatial refiner. It should produce accurate pixel-level ignition probability masks on fine-resolution patches, including patches that are true positives from Model B and false-positive patches that still pass the gate.
 
 Current cascade:
 
@@ -178,24 +180,80 @@ number of false coarse regions passed
 runtime reduction compared with all-25 m scanning
 ```
 
-### Recommended Next Tuning If Retraining
+## Run 002 — Initial 25 m Model A Spatial Refiner Smoke Test
 
-Try gentler suppression:
+Date: 2026-05-15
+
+### Purpose
+
+Start Model A 25 m spatial-refiner training after Model B reached a usable gatekeeper operating point.
+
+This was a short 5-epoch smoke test to verify:
 
 ```text
-phase2_lambda_patch = 0.10
-phase3_lambda_patch = 0.25
-phase4_lambda_patch = 0.15
-phase1_lr = 1e-4
-phase2_lr = 5e-5
-phase3_lr = 3e-5
-phase4_lr = 2e-5
+1. 25 m patch loading works.
+2. 25 m channel normalization works.
+3. Model A trains without NaN loss.
+4. The updated shape-safe training script works.
 ```
 
-Expected effect:
+### Training Choice
+
+Model A should be trained on balanced 25 m patches, not ignition-only patches.
+
+Reason:
 
 ```text
-Phase 3 should become less noisy. Precision should degrade less severely. Recall should remain more stable.
+Model B false positives will not be zero. Some no-ignition coarse regions will still reach Model A, so Model A must learn to output near-empty masks on no-ignition fine patches instead of hallucinating ignition.
+```
+
+### Initial Smoke-Test Result
+
+| Epoch | train_loss | train_precision | train_recall | train_pixel_fp_rate | val_loss | val_precision | val_recall | val_pixel_fp_rate | Notes |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| 1 | 6.9683e-05 | 0.4731 | 0.6956 | 5.7471e-04 | 3.0070e-06 | 0.5056 | 0.4965 | 3.3775e-05 | Model started learning. |
+| 2 | 3.8690e-06 | 0.7234 | 0.9874 | 4.8429e-05 | 2.6111e-06 | 0.5056 | 0.5035 | 3.7718e-05 | Best validation loss. |
+| 3 | 3.1632e-06 | 0.7377 | 0.9890 | 4.3717e-05 | 3.1566e-06 | 0.5056 | 0.5021 | 3.6175e-05 | Validation did not improve. |
+| 4 | 2.9941e-06 | 0.7376 | 0.9901 | 4.3918e-05 | 2.6640e-06 | 0.5056 | 0.5035 | 3.8576e-05 | Validation nearly flat. |
+| 5 | 2.8868e-06 | 0.7439 | 0.9903 | 4.2299e-05 | 2.6566e-06 | 0.5056 | 0.5035 | 3.6004e-05 | LR reduced after no improvement. |
+
+### Interpretation
+
+- Training metrics improved rapidly.
+- Validation precision and recall stayed around `0.50`, which suggests threshold `0.5` may not be the right evaluation threshold for sparse 25 m masks.
+- Best validation loss occurred at epoch 2.
+- The run confirms the code path works, but it is not enough to judge final Model A quality.
+
+### Decision
+
+Continue with balanced 25 m training, but lower the learning rate for the next run.
+
+Recommended next command:
+
+```bash
+python -m src.training.train_model_a \
+  --train-dir /mnt/work/wildfire/25m/patches_25m_balanced/train \
+  --val-dir /mnt/work/wildfire/25m/patches_25m_balanced/val \
+  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
+  --output-model models/model_A_25m_spatial_unet.keras \
+  --resolution-m 25 \
+  --epochs 50 \
+  --batch-size 8 \
+  --learning-rate 5e-5
+```
+
+### Next Evaluation Need
+
+After a longer balanced run, Model A should be evaluated with threshold sweeps and spatial metrics:
+
+```text
+Dice
+IoU
+precision
+recall
+false-positive pixels
+empty-patch behavior
+visual sample outputs
 ```
 
 ## Future Run Template
@@ -239,15 +297,19 @@ paste command here
 | phase2_lr |  |  |  |
 | phase3_lr |  |  |  |
 | phase4_lr |  |  |  |
+| model_a_learning_rate |  |  |  |
+| model_a_focal_alpha |  |  |  |
+| model_a_focal_gamma |  |  |  |
 
 ### Results
 
-| Phase | val_patch_fp_rate_05 | val_precision | val_recall | val_loss | Notes |
+| Phase / Model | val_patch_fp_rate_05 | val_precision | val_recall | val_loss | Notes |
 |---|---:|---:|---:|---:|---|
-| 1 |  |  |  |  |  |
-| 2 |  |  |  |  |  |
-| 3 |  |  |  |  |  |
-| 4 |  |  |  |  |  |
+| Model B Phase 1 |  |  |  |  |  |
+| Model B Phase 2 |  |  |  |  |  |
+| Model B Phase 3 |  |  |  |  |  |
+| Model B Phase 4 |  |  |  |  |  |
+| Model A |  |  |  |  |  |
 
 ### Interpretation
 
@@ -267,6 +329,7 @@ Reject this run
 Threshold-sweep this run
 Retrain with adjusted parameters
 Collect hard negatives next
+Proceed to pipeline test
 ```
 
 ### Next Planned Change

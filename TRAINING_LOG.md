@@ -220,40 +220,120 @@ Model B false positives will not be zero. Some no-ignition coarse regions will s
 ### Interpretation
 
 - Training metrics improved rapidly.
-- Validation precision and recall stayed around `0.50`, which suggests threshold `0.5` may not be the right evaluation threshold for sparse 25 m masks.
-- Best validation loss occurred at epoch 2.
-- The run confirms the code path works, but it is not enough to judge final Model A quality.
+- Validation precision and recall appeared stuck around `0.50` before the evaluation label-shape bug was fixed.
+- The run confirmed the code path worked, but the initial validation interpretation was unreliable.
 
-### Decision
+## Run 003 — Model A Lower-LR Training and Corrected Validation Diagnostic
 
-Continue with balanced 25 m training, but lower the learning rate for the next run.
+Date: 2026-05-15
 
-Recommended next command:
+### Purpose
 
-```bash
-python -m src.training.train_model_a \
-  --train-dir /mnt/work/wildfire/25m/patches_25m_balanced/train \
-  --val-dir /mnt/work/wildfire/25m/patches_25m_balanced/val \
-  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
-  --output-model models/model_A_25m_spatial_unet.keras \
-  --resolution-m 25 \
-  --epochs 50 \
-  --batch-size 8 \
-  --learning-rate 5e-5
+Rerun 25 m Model A training with a lower learning rate and diagnose why validation metrics seemed flat.
+
+### Parameter Change
+
+| Parameter | Previous | New | Reason |
+|---|---:|---:|---|
+| model_a_learning_rate | 1e-4 | 5e-5 | Reduce update size after early validation plateau in smoke test. |
+
+### Training Outcome
+
+Training improved normally, and early stopping restored the best checkpoint from epoch 8.
+
+Best checkpoint:
+
+```text
+epoch: 8
+val_loss: 2.4324e-06
+```
+
+The raw Keras validation precision/recall still appeared near `0.50`, but this was later traced to an evaluation shape issue in the diagnostic path rather than a failed model.
+
+### Evaluation Bug Found and Fixed
+
+Bug:
+
+```text
+src/data/npz_loader.py returned labels as (H, W), while predictions were (H, W, 1). This caused NumPy broadcasting during diagnostics and inflated positive-pixel counts.
+```
+
+Fix:
+
+```text
+src/data/npz_loader.py now returns labels as (H, W, 1), matching NPZPatchDataset and training-time label shape.
+```
+
+### Corrected 1000-Patch Validation Diagnostic
+
+Validation sample:
+
+```text
+files_seen: 1000
+usable_patches: 1000
+positive_patches: 716
+negative_patches: 284
+total_pixels: 4096000
+total_positive_pixels: 716
+positive_pixel_fraction: 0.00017480
+invalid_feature_values_before_cleaning: 12288
+invalid_label_values_before_cleaning: 0
+```
+
+Prediction distribution:
+
+```text
+pred_max_min: 0.00269359
+pred_max_median: 0.78716451
+pred_max_max: 0.99515307
+pred_mean_mean: 0.00020524
+```
+
+Corrected threshold sweep:
+
+| Threshold | Precision | Recall | FP Rate | Dice | IoU | TP | FP | FN |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.05 | 0.5046 | 1.0000 | 0.00017166 | 0.6707 | 0.5046 | 716 | 703 | 0 |
+| 0.10 | 0.7982 | 1.0000 | 0.00004420 | 0.8878 | 0.7982 | 716 | 181 | 0 |
+| 0.15 | 0.8404 | 1.0000 | 0.00003321 | 0.9133 | 0.8404 | 716 | 136 | 0 |
+| 0.20 | 0.8524 | 1.0000 | 0.00003028 | 0.9203 | 0.8524 | 716 | 124 | 0 |
+| 0.25 | 0.8637 | 1.0000 | 0.00002759 | 0.9269 | 0.8637 | 716 | 113 | 0 |
+| 0.30 | 0.8742 | 1.0000 | 0.00002515 | 0.9329 | 0.8742 | 716 | 103 | 0 |
+| 0.35 | 0.8795 | 0.9986 | 0.00002393 | 0.9353 | 0.8784 | 715 | 98 | 1 |
+| 0.40 | 0.8904 | 0.9986 | 0.00002149 | 0.9414 | 0.8893 | 715 | 88 | 1 |
+| 0.45 | 0.9074 | 0.9986 | 0.00001783 | 0.9508 | 0.9062 | 715 | 73 | 1 |
+| 0.50 | 0.9261 | 0.9972 | 0.00001392 | 0.9603 | 0.9237 | 714 | 57 | 2 |
+
+### Model A Threshold Decision
+
+Selected operating point:
+
+```text
+model: models/model_A_25m_spatial_unet.keras
+threshold: 0.50
+```
+
+Reason:
+
+```text
+Threshold 0.50 gives the best Dice/IoU tradeoff in the corrected diagnostic. Moving from 0.45 to 0.50 removes 16 false-positive pixels while adding only 1 false-negative pixel.
+```
+
+### Current Model A Decision
+
+```text
+Use Model A 25 m spatial refiner at threshold 0.50 for the next visual sample inspection and coarse-to-fine pipeline test.
 ```
 
 ### Next Evaluation Need
 
-After a longer balanced run, Model A should be evaluated with threshold sweeps and spatial metrics:
+Before pipeline integration, export visual Model A prediction samples:
 
 ```text
-Dice
-IoU
-precision
-recall
-false-positive pixels
-empty-patch behavior
-visual sample outputs
+true positives
+false positives
+false negatives
+clean negatives
 ```
 
 ## Future Run Template

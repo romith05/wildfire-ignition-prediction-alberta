@@ -319,21 +319,55 @@ Reason:
 Threshold 0.50 gives the best Dice/IoU tradeoff in the corrected diagnostic. Moving from 0.45 to 0.50 removes 16 false-positive pixels while adding only 1 false-negative pixel.
 ```
 
+### Visual Sample Inspection
+
+Visual samples were exported and manually inspected for:
+
+```text
+true positives
+false negatives
+false positives
+clean negatives
+```
+
+Observed counts from the sample exporter:
+
+```text
+true_positive: 12
+false_negative: 2
+false_positive: 12
+clean_negative: 12
+```
+
+Visual findings:
+
+- True positives looked spatially aligned; predicted hotspots landed on the one-pixel ground-truth ignition labels.
+- False negatives were borderline one-pixel cases, not catastrophic misses.
+- One false negative had `pred_max` near the selected threshold, so a lower threshold could recover it.
+- False positives were tiny isolated activations rather than large noisy blobs.
+- Clean negatives were mostly empty at the binary threshold.
+
 ### Current Model A Decision
 
 ```text
-Use Model A 25 m spatial refiner at threshold 0.50 for the next visual sample inspection and coarse-to-fine pipeline test.
+Default operating point: models/model_A_25m_spatial_unet.keras @ threshold 0.50
+Backup recall point: models/model_A_25m_spatial_unet.keras @ threshold 0.45
+```
+
+Reason:
+
+```text
+Threshold 0.50 is the best default because it has strong precision, strong Dice/IoU, and visually acceptable errors. Threshold 0.45 is kept as a recall-favoring backup because one false negative was close to 0.50.
 ```
 
 ### Next Evaluation Need
 
-Before pipeline integration, export visual Model A prediction samples:
+Proceed to the first coarse-to-fine pipeline test:
 
 ```text
-true positives
-false positives
-false negatives
-clean negatives
+Model B Phase 2 @ threshold 0.40
+↓
+Model A 25 m spatial refiner @ threshold 0.50
 ```
 
 ## Future Run Template

@@ -14,6 +14,90 @@ from src.training.losses import combined_loss, focal_loss
 from src.training.metrics import pixel_fp_rate, patch_fp_rate
 
 
+class MixedNPZPatchDataset:
+    """Dataset wrapper that mixes balanced data with repeated hard negatives.
+
+    The hard-negative ratio is approximate and implemented by repeating hard
+    negative samples until they make up the requested fraction of the mixed
+    training list.
+
+    Example:
+        hard_negative_ratio=0.10 means roughly 10% of one epoch comes from
+        hard negatives and 90% comes from the base balanced dataset.
+    """
+
+    def __init__(self, base_dataset, hard_negative_datasets=None, hard_negative_ratio=0.0):
+        self.base_dataset = base_dataset
+        self.hard_negative_datasets = hard_negative_datasets or []
+        self.hard_negative_ratio = float(hard_negative_ratio)
+        self.C = base_dataset.C
+        self.feature_keys = base_dataset.feature_keys
+
+        self.samples = [("base", 0, idx) for idx in range(len(base_dataset))]
+
+        if self.hard_negative_ratio > 0 and self.hard_negative_datasets:
+            self._validate_hard_negative_datasets()
+            self.samples.extend(self._build_hard_negative_samples())
+
+        self.valid_files = self._build_valid_file_list()
+
+        print("Mixed Model B training dataset")
+        print(f"Base samples: {len(base_dataset)}")
+        print(f"Hard-negative folders: {len(self.hard_negative_datasets)}")
+        print(f"Requested hard-negative ratio: {self.hard_negative_ratio:.3f}")
+        print(f"Total mixed samples: {len(self.samples)}")
+        print(f"Effective hard-negative samples: {self._count_hard_samples()}")
+
+    def _validate_hard_negative_datasets(self):
+        for dataset in self.hard_negative_datasets:
+            if dataset.C != self.C:
+                raise ValueError(
+                    f"Hard-negative channel count {dataset.C} does not match base channel count {self.C}."
+                )
+            if dataset.feature_keys != self.feature_keys:
+                raise ValueError(
+                    "Hard-negative feature keys do not match base dataset feature keys."
+                )
+
+    def _build_hard_negative_samples(self):
+        hard_refs = []
+        for dataset_idx, dataset in enumerate(self.hard_negative_datasets):
+            for sample_idx in range(len(dataset)):
+                hard_refs.append(("hard", dataset_idx, sample_idx))
+
+        if not hard_refs:
+            return []
+
+        if self.hard_negative_ratio <= 0:
+            return []
+        if self.hard_negative_ratio >= 1:
+            raise ValueError("hard_negative_ratio must be < 1.0")
+
+        base_count = len(self.base_dataset)
+        target_hard_count = math.ceil((self.hard_negative_ratio * base_count) / (1.0 - self.hard_negative_ratio))
+        repeats = math.ceil(target_hard_count / len(hard_refs))
+        expanded = (hard_refs * repeats)[:target_hard_count]
+        return expanded
+
+    def _build_valid_file_list(self):
+        files = list(self.base_dataset.valid_files)
+        for dataset in self.hard_negative_datasets:
+            files.extend(dataset.valid_files)
+        return files
+
+    def _count_hard_samples(self):
+        return sum(1 for sample in self.samples if sample[0] == "hard")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        source, dataset_idx, sample_idx = self.samples[idx]
+        if source == "base":
+            return self.base_dataset[sample_idx]
+        return self.hard_negative_datasets[dataset_idx][sample_idx]
+
+
 def load_channel_stats(path):
     """Load channel normalization statistics from JSON."""
     if path is None:
@@ -92,6 +176,7 @@ def fit_phase(model, train_gen, val_gen, args, phase_number, phase_name, phase_g
     """Run one fixed Model B training phase and save its own model."""
     print(f"\nPhase {phase_number}: {phase_name}")
     print(f"Goal: {phase_goal}")
+    print(f"Training samples this phase: {len(train_gen.dataset)}")
     print(f"Saving best phase model to: {output_path}")
 
     model.fit(
@@ -108,14 +193,33 @@ def fit_phase(model, train_gen, val_gen, args, phase_number, phase_name, phase_g
     print(f"Saved phase {phase_number} model to {output_path}")
 
 
-def train_phased_model_b(model, train_gen, val_gen, args):
+def make_phase_train_generator(base_dataset, hard_negative_datasets, batch_size, hard_negative_ratio):
+    """Create a phase-specific training generator."""
+    if hard_negative_ratio > 0 and hard_negative_datasets:
+        dataset = MixedNPZPatchDataset(
+            base_dataset=base_dataset,
+            hard_negative_datasets=hard_negative_datasets,
+            hard_negative_ratio=hard_negative_ratio,
+        )
+    else:
+        dataset = base_dataset
+        print("Mixed Model B training dataset")
+        print(f"Base samples: {len(base_dataset)}")
+        print("Hard-negative folders: 0 used in this phase")
+        print("Requested hard-negative ratio: 0.000")
+        print(f"Total mixed samples: {len(dataset)}")
+
+    return KerasNPZGenerator(dataset, batch_size=batch_size, shuffle=True)
+
+
+def train_phased_model_b(model, base_train_dataset, hard_negative_datasets, val_gen, args):
     """Run the four-phase patch-gatekeeper regimen.
 
     Phase goals:
     1. preserve ignition sensitivity from the base U-Net,
-    2. introduce weak patch-level suppression,
-    3. aggressively reduce no-ignition false activations,
-    4. recover recall while keeping suppression.
+    2. introduce weak patch-level suppression with light hard-negative exposure,
+    3. aggressively reduce no-ignition false activations with more hard negatives,
+    4. recover recall while keeping suppression on the balanced base distribution.
     """
     phases = [
         {
@@ -124,36 +228,46 @@ def train_phased_model_b(model, train_gen, val_gen, args):
             "goal": "Preserve base ignition recall and adapt the base model to mixed 1 km data.",
             "epochs": args.phase1_epochs,
             "learning_rate": args.phase1_lr,
+            "hard_negative_ratio": 0.0,
             "loss": focal_loss(alpha=0.90, gamma=2.50),
         },
         {
             "number": 2,
-            "name": "weak patch suppression",
-            "goal": "Begin reducing no-ignition patch activations without hurting recall too much.",
+            "name": "weak patch suppression with light hard negatives",
+            "goal": "Begin reducing no-ignition patch activations while introducing a small hard-negative fraction.",
             "epochs": args.phase2_epochs,
             "learning_rate": args.phase2_lr,
+            "hard_negative_ratio": args.phase2_hard_negative_ratio,
             "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=args.phase2_lambda_patch),
         },
         {
             "number": 3,
-            "name": "strong patch suppression",
-            "goal": "Push down false positive no-ignition patches and hard negatives more aggressively.",
+            "name": "strong patch suppression with hard negatives",
+            "goal": "Push down false positive no-ignition patches using stronger suppression and more hard negatives.",
             "epochs": args.phase3_epochs,
             "learning_rate": args.phase3_lr,
+            "hard_negative_ratio": args.phase3_hard_negative_ratio,
             "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=args.phase3_lambda_patch),
         },
         {
             "number": 4,
             "name": "recall recovery and calibration",
-            "goal": "Relax suppression slightly to recover recall while retaining patch-level discipline.",
+            "goal": "Return to the balanced base distribution to recover recall while retaining patch-level discipline.",
             "epochs": args.phase4_epochs,
             "learning_rate": args.phase4_lr,
+            "hard_negative_ratio": args.phase4_hard_negative_ratio,
             "loss": combined_loss(alpha=0.90, gamma=2.50, lambda_patch=args.phase4_lambda_patch),
         },
     ]
 
     for phase in phases:
         output_path = phase_model_path(args.output_model, phase["number"])
+        train_gen = make_phase_train_generator(
+            base_dataset=base_train_dataset,
+            hard_negative_datasets=hard_negative_datasets,
+            batch_size=args.batch_size,
+            hard_negative_ratio=phase["hard_negative_ratio"],
+        )
         compile_for_phase(
             model,
             loss_fn=phase["loss"],
@@ -172,6 +286,24 @@ def train_phased_model_b(model, train_gen, val_gen, args):
         )
 
 
+def load_hard_negative_datasets(paths, label_key, channel_stats):
+    """Load zero or more hard-negative folders."""
+    datasets = []
+    if not paths:
+        return datasets
+
+    for path in paths:
+        print(f"Loading Model B hard negatives from: {path}")
+        datasets.append(
+            NPZPatchDataset(
+                folder=path,
+                label_key=label_key,
+                channel_stats=channel_stats,
+            )
+        )
+    return datasets
+
+
 def train_model_b(args):
     channel_stats = load_channel_stats(args.channel_stats)
 
@@ -185,6 +317,11 @@ def train_model_b(args):
         label_key=args.label_key,
         channel_stats=channel_stats,
     )
+    hard_negative_datasets = load_hard_negative_datasets(
+        paths=args.hard_negative_dir,
+        label_key=args.label_key,
+        channel_stats=channel_stats,
+    )
 
     input_shape = infer_input_shape(train_dataset)
     val_input_shape = infer_input_shape(val_dataset)
@@ -193,21 +330,28 @@ def train_model_b(args):
             f"Train/val input shape mismatch. Train: {input_shape}, Val: {val_input_shape}"
         )
 
+    for dataset in hard_negative_datasets:
+        hard_input_shape = infer_input_shape(dataset)
+        if hard_input_shape != input_shape:
+            raise ValueError(
+                f"Hard-negative input shape mismatch. Base: {input_shape}, Hard negatives: {hard_input_shape}"
+            )
+
     if args.patch_size is not None and args.patch_size != input_shape[0]:
         print(
             f"Warning: --patch-size={args.patch_size} but detected patch height={input_shape[0]}. "
             "Using detected input shape."
         )
 
-    train_gen = KerasNPZGenerator(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_gen = KerasNPZGenerator(val_dataset, batch_size=args.batch_size, shuffle=False)
 
     print(f"Model B input shape: {input_shape}")
     print(f"Model B patch resolution: {args.resolution_m} m")
-    print("Model B training regimen: phased patch gatekeeper")
+    print("Model B training regimen: phased patch gatekeeper with optional hard-negative mixing")
+    print(f"Hard-negative datasets loaded: {len(hard_negative_datasets)}")
 
     model = build_model(input_shape=input_shape, base_model=args.base_model)
-    train_phased_model_b(model, train_gen, val_gen, args)
+    train_phased_model_b(model, train_dataset, hard_negative_datasets, val_gen, args)
 
     model.save(args.output_model)
     print(f"Saved final Model B to {args.output_model}")
@@ -220,6 +364,12 @@ def main():
     parser.add_argument("--val-dir", required=True)
     parser.add_argument("--output-model", default="models/model_B_1km_gatekeeper.keras")
     parser.add_argument("--base-model", required=True, help="Saved ignition-only base Model A used to initialize Model B.")
+    parser.add_argument(
+        "--hard-negative-dir",
+        action="append",
+        default=None,
+        help="Optional hard-negative folder. Can be passed multiple times.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--channel-stats", default=None, help="Optional channel_stats.json path.")
     parser.add_argument("--label-key", default="class", help="NPZ label/mask key.")
@@ -244,6 +394,10 @@ def main():
     parser.add_argument("--phase2-lambda-patch", type=float, default=0.10)
     parser.add_argument("--phase3-lambda-patch", type=float, default=0.50)
     parser.add_argument("--phase4-lambda-patch", type=float, default=0.30)
+
+    parser.add_argument("--phase2-hard-negative-ratio", type=float, default=0.10)
+    parser.add_argument("--phase3-hard-negative-ratio", type=float, default=0.25)
+    parser.add_argument("--phase4-hard-negative-ratio", type=float, default=0.00)
 
     args = parser.parse_args()
     train_model_b(args)

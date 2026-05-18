@@ -14,6 +14,22 @@ Current cascade:
 1 km scan -> Model B gatekeeper -> selected coarse patches -> 25 m Model A refiner
 ```
 
+## Current Operating Decisions
+
+```text
+Model B default: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
+Model B backup:  models/model_B_1km_gatekeeper_phase4.keras @ threshold 0.45
+Model A default: models/model_A_25m_spatial_unet.keras @ threshold 0.50
+Model A backup:  models/model_A_25m_spatial_unet.keras @ threshold 0.45
+Model A operational min positive pixels: 1
+```
+
+Reason for Model A min positive pixels:
+
+```text
+The current 25 m labels are one-pixel ignition targets. Requiring more than one predicted positive pixel incorrectly suppresses true ignition patches, so min_pixels > 1 is rejected as an operational rule for now.
+```
+
 ## Run 001 — Initial Phased 1 km Model B Baseline
 
 Date: 2026-05-11
@@ -70,14 +86,6 @@ models/model_B_1km_gatekeeper.keras
 | 3 | Strongly suppress patch false positives | combined | 5 | 5e-5 | 0.50 |
 | 4 | Recover recall and calibrate | combined | 3 | 3e-5 | 0.30 |
 
-### Why These Parameters Were Used
-
-- Phase 1 avoids patch suppression so the base ignition signal is not destroyed immediately.
-- Phase 2 introduces weak patch suppression to reduce coarse false alarms.
-- Phase 3 tests stronger patch suppression.
-- Phase 4 relaxes suppression to recover recall.
-- Learning rate decreases phase by phase to make later updates less disruptive.
-
 ### Results Summary
 
 | Phase | val_patch_fp_rate_05 | val_precision | val_recall | val_loss | Interpretation |
@@ -87,98 +95,37 @@ models/model_B_1km_gatekeeper.keras
 | 3 | 0.0639 at best-val-loss epoch | 0.4008 | 0.9483 | 0.1121 | Suppression likely too strong; precision degraded. |
 | 4 | 0.0562 final, 0.0485 best checkpoint | 0.3996 final, 0.3989 best checkpoint | 0.9344 final, 0.9092 best checkpoint | 0.0820 final, 0.0784 best checkpoint | Recall recovered, but precision stayed weak. |
 
-### Phase 2 Threshold Sweep Decision
+### Threshold Decisions
 
-Decision date: 2026-05-14
-
-Selected operating point for the current Phase 2 model:
+Phase 2 selected operating point:
 
 ```text
 model: models/model_B_1km_gatekeeper_phase2.keras
 threshold: 0.40
 ```
 
-Reason:
-
-- Threshold `0.40` is the safer default gatekeeper threshold because it keeps recall higher than `0.45` while still reducing the 25 m refinement workload.
-- Threshold `0.45` remains a stricter/high-confidence option, but it misses more positive patches.
-
-Phase 2 sweep comparison:
+Phase 2 comparison:
 
 | Threshold | Patch Recall | Patch Precision | Patch FP Rate | Pass Rate | Passed Patches | TP | FP | TN | FN |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 0.40 | 0.9441 | 0.8848 | 0.1250 | 0.5380 | 764 | 676 | 88 | 616 | 40 |
 | 0.45 | 0.9260 | 0.8972 | 0.1080 | 0.5204 | 739 | 663 | 76 | 628 | 53 |
 
-Interpretation:
+Phase 4 backup operating point:
 
 ```text
-Moving from 0.40 to 0.45 saves only 25 passed patches, but misses 13 additional positive patches. For a wildfire gatekeeper, the recall loss is not worth the small workload reduction at this stage.
+model: models/model_B_1km_gatekeeper_phase4.keras
+threshold: 0.45
 ```
 
-### Phase 4 Sweep Comparison
-
-Phase 4 was also evaluated after the Phase 2 decision.
-
-Important Phase 4 points:
-
-| Threshold | Patch Recall | Patch Precision | Patch FP Rate | Pass Rate | Passed Patches | TP | FP | TN | FN |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0.40 | 0.9455 | 0.8724 | 0.1406 | 0.5465 | 776 | 677 | 99 | 605 | 39 |
-| 0.45 | 0.9399 | 0.8890 | 0.1193 | 0.5331 | 757 | 673 | 84 | 620 | 43 |
-| 0.50 | 0.9358 | 0.8957 | 0.1108 | 0.5268 | 748 | 670 | 78 | 626 | 46 |
-
-Comparison against Phase 2:
-
-```text
-Phase 2 @ 0.40: recall 0.9441, patch FP rate 0.1250, pass rate 0.5380.
-Phase 4 @ 0.45: recall 0.9399, patch FP rate 0.1193, pass rate 0.5331.
-```
-
-Interpretation:
-
-```text
-Phase 4 @ 0.45 is a strong backup operating point. It has slightly lower recall than Phase 2 @ 0.40, but slightly lower patch false positive rate and pass rate. The tradeoff is close.
-```
-
-Current decision after reviewing Phase 4:
-
-```text
-Default operating point: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
-Backup stricter point: models/model_B_1km_gatekeeper_phase4.keras @ threshold 0.45
-```
+Phase 4 @ 0.45 is a strong backup but does not clearly beat Phase 2 @ 0.40 for the default setting.
 
 ### Takeaways
 
-1. Phase 1 worked as a sensitivity warm start.
-2. Phase 2 gave the cleanest patch false-positive reduction.
+1. Phase 2 threshold `0.40` is the current default Model B operating point.
+2. Phase 4 threshold `0.45` is the backup stricter operating point.
 3. Phase 3 appears too aggressive with `lambda_patch=0.50`.
-4. Phase 4 recovered recall but did not clearly beat Phase 2 at the selected operating point.
-5. Do not automatically choose the final model.
-6. Phase 2 threshold `0.40` is the current default operating point.
-7. Phase 4 threshold `0.45` is the backup stricter operating point.
-
-### Candidate Models To Evaluate
-
-```text
-models/model_B_1km_gatekeeper_phase2.keras
-models/model_B_1km_gatekeeper_phase4.keras
-```
-
-### Recommended Next Evaluation
-
-Use the selected Phase 2 model in the first coarse-to-fine pipeline test.
-
-Track:
-
-```text
-number of 1 km patches scanned
-number of 1 km patches passed by Model B
-percentage of coarse grid passed to 25 m refinement
-number of known ignition regions retained
-number of false coarse regions passed
-runtime reduction compared with all-25 m scanning
-```
+4. Do not automatically choose the final model; evaluate saved phase checkpoints.
 
 ## Run 002 — Initial 25 m Model A Spatial Refiner Smoke Test
 
@@ -219,9 +166,7 @@ Model B false positives will not be zero. Some no-ignition coarse regions will s
 
 ### Interpretation
 
-- Training metrics improved rapidly.
-- Validation precision and recall appeared stuck around `0.50` before the evaluation label-shape bug was fixed.
-- The run confirmed the code path worked, but the initial validation interpretation was unreliable.
+The run confirmed the training path worked, but the initial validation interpretation was unreliable because a later diagnostic found an evaluation label-shape bug.
 
 ## Run 003 — Model A Lower-LR Training and Corrected Validation Diagnostic
 
@@ -241,14 +186,10 @@ Rerun 25 m Model A training with a lower learning rate and diagnose why validati
 
 Training improved normally, and early stopping restored the best checkpoint from epoch 8.
 
-Best checkpoint:
-
 ```text
 epoch: 8
 val_loss: 2.4324e-06
 ```
-
-The raw Keras validation precision/recall still appeared near `0.50`, but this was later traced to an evaluation shape issue in the diagnostic path rather than a failed model.
 
 ### Evaluation Bug Found and Fixed
 
@@ -266,8 +207,6 @@ src/data/npz_loader.py now returns labels as (H, W, 1), matching NPZPatchDataset
 
 ### Corrected 1000-Patch Validation Diagnostic
 
-Validation sample:
-
 ```text
 files_seen: 1000
 usable_patches: 1000
@@ -278,15 +217,6 @@ total_positive_pixels: 716
 positive_pixel_fraction: 0.00017480
 invalid_feature_values_before_cleaning: 12288
 invalid_label_values_before_cleaning: 0
-```
-
-Prediction distribution:
-
-```text
-pred_max_min: 0.00269359
-pred_max_median: 0.78716451
-pred_max_max: 0.99515307
-pred_mean_mean: 0.00020524
 ```
 
 Corrected threshold sweep:
@@ -306,8 +236,6 @@ Corrected threshold sweep:
 
 ### Model A Threshold Decision
 
-Selected operating point:
-
 ```text
 model: models/model_A_25m_spatial_unet.keras
 threshold: 0.50
@@ -320,15 +248,6 @@ Threshold 0.50 gives the best Dice/IoU tradeoff in the corrected diagnostic. Mov
 ```
 
 ### Visual Sample Inspection
-
-Visual samples were exported and manually inspected for:
-
-```text
-true positives
-false negatives
-false positives
-clean negatives
-```
 
 Observed counts from the sample exporter:
 
@@ -343,7 +262,6 @@ Visual findings:
 
 - True positives looked spatially aligned; predicted hotspots landed on the one-pixel ground-truth ignition labels.
 - False negatives were borderline one-pixel cases, not catastrophic misses.
-- One false negative had `pred_max` near the selected threshold, so a lower threshold could recover it.
 - False positives were tiny isolated activations rather than large noisy blobs.
 - Clean negatives were mostly empty at the binary threshold.
 
@@ -352,22 +270,6 @@ Visual findings:
 ```text
 Default operating point: models/model_A_25m_spatial_unet.keras @ threshold 0.50
 Backup recall point: models/model_A_25m_spatial_unet.keras @ threshold 0.45
-```
-
-Reason:
-
-```text
-Threshold 0.50 is the best default because it has strong precision, strong Dice/IoU, and visually acceptable errors. Threshold 0.45 is kept as a recall-favoring backup because one false negative was close to 0.50.
-```
-
-### Next Evaluation Need
-
-Proceed to the first coarse-to-fine pipeline test:
-
-```text
-Model B Phase 2 @ threshold 0.40
-↓
-Model A 25 m spatial refiner @ threshold 0.50
 ```
 
 ## Run 004 — Test-Only Paired Patch Pipeline Baseline
@@ -385,6 +287,7 @@ This is a controlled test only. It uses matching filenames between the two patch
 ```text
 Model B: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
 Model A: models/model_A_25m_spatial_unet.keras @ threshold 0.50
+Model A min positive pixels: 1
 ```
 
 ### Pipeline Summary
@@ -435,15 +338,6 @@ Kept as final positives: 23
 Patch removal rate: 0.0800
 ```
 
-### Interpretation
-
-- The paired test pipeline works mechanically: Model B runs, matching 25 m patches are found, Model A runs, and results are summarized.
-- Model B is doing most of the patch-level gatekeeping.
-- Model A preserves all true-positive patches passed by Model B in this test.
-- Model A removes only a small fraction of Model B false-positive patches at the patch level.
-- This is acceptable because Model A is primarily a pixel-level spatial refiner, not a second patch gatekeeper.
-- The high final cascade patch FP rate of `0.9200` is computed only among the 25 Model-B-passed negative patches, not the full 1000-patch test set.
-
 ### Decision
 
 ```text
@@ -451,14 +345,132 @@ Keep this as the first paired-pipeline baseline.
 Proceed to a negative-heavy test set before judging Alberta-wide operational false alarms.
 ```
 
-### Next Evaluation Need
+## Run 005 — Negative-Heavy Paired Pipeline and Min-Pixel Rule Test
 
-Run the same paired pipeline on a negative-heavy or more realistic validation sample.
+Date: 2026-05-18
+
+### Purpose
+
+Stress-test the paired pipeline on a more realistic negative-heavy sample and evaluate whether Model A can reduce patch-level false positives after Model B.
+
+### Test Set
+
+```text
+rows: 804
+positive patches: 100
+negative patches: 704
+```
+
+### Model Settings
+
+Default negative-heavy run:
+
+```text
+Model B: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
+Model A: models/model_A_25m_spatial_unet.keras @ threshold 0.50
+Model A min positive pixels: 1
+```
+
+### Negative-Heavy Result With Min Pixels = 1
+
+```text
+rows: 804
+blocked_by_model_b: 620
+completed: 184
+Model B passed patches: 184 / 804 = 0.2289
+Model A ran patches: 184 / 804 = 0.2289
+Final positive patches: 181 / 804 = 0.2251
+Rows with 25 m labels: 184 / 804
+Missing paired 25 m patches: 0
+```
+
+Model B patch-level result:
+
+| Metric | Value |
+|---|---:|
+| TP | 96 |
+| FP | 88 |
+| TN | 616 |
+| FN | 4 |
+| patch precision | 0.5217 |
+| patch recall | 0.9600 |
+| patch FP rate | 0.1250 |
+| patch accuracy | 0.8856 |
+
+Model A effect on Model-B-passed false positives:
+
+```text
+Model B false-positive patch candidates: 88
+Removed by Model A: 3
+Kept as final positives: 85
+Patch removal rate: 0.0341
+```
+
+### Min-Positive-Pixel Experiment
+
+The pipeline was extended with:
+
+```text
+--model-a-min-positive-pixels
+```
+
+This tested whether requiring more than one predicted positive 25 m pixel would suppress patch-level false positives.
+
+Finding:
+
+```text
+min_pixels > 1 is not appropriate as an operational rule with the current labels.
+```
 
 Reason:
 
 ```text
-The current 1000-patch sample is positive-heavy. Alberta-wide deployment will be overwhelmingly negative, so the next test must stress false-positive behavior under a more realistic class distribution.
+Many true 25 m ignition patches have exactly one labeled ignition pixel, and Model A often predicts exactly one high-confidence positive pixel for those true positives. Requiring 2 or 3 pixels suppresses real ignition detections.
+```
+
+Example pattern observed in the CSV:
+
+```text
+label_25m_positive = True
+model_a_max_prob is high
+model_a_positive_pixels = 1
+model_a_min_positive_pixels = 3
+final_positive = 0
+```
+
+Interpretation:
+
+```text
+The min-pixel rule can be useful for analysis, but it should not be used as the production final decision rule unless the label definition changes from one-pixel ignition points to area masks.
+```
+
+### Decision
+
+```text
+Keep Model A operational min positive pixels = 1.
+Reject min_pixels > 1 as the default final-decision rule for current labels.
+```
+
+### Main Takeaway
+
+The negative-heavy test shows that Model B is recall-safe and reduces workload substantially, but its false-positive burden is still the main operational issue.
+
+```text
+Model B should remain the focus for patch-level false-positive reduction.
+Model A should remain a pixel-level spatial refiner, not a second patch gatekeeper.
+```
+
+### Next Planned Change
+
+Improve Model B false-positive behavior by collecting and using hard negatives from Model-B-passed no-ignition patches.
+
+Possible next steps:
+
+```text
+1. Use the negative-heavy paired pipeline CSV to identify Model B false positives.
+2. Add those no-ignition patches to a hard-negative set.
+3. Fine-tune Model B with hard negatives or run another phased training pass with gentler suppression.
+4. Re-run the negative-heavy pipeline test.
 ```
 
 ## Future Run Template
@@ -513,7 +525,7 @@ paste command here
 | Model B Phase 1 |  |  |  |  |  |
 | Model B Phase 2 |  |  |  |  |  |
 | Model B Phase 3 |  |  |  |  |  |
-| Model B Phase 4 |  |  |  |  |
+| Model B Phase 4 |  |  |  |  |  |
 | Model A |  |  |  |  |  |
 
 ### Interpretation

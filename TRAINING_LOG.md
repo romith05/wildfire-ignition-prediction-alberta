@@ -17,10 +17,11 @@ Current cascade:
 ## Current Operating Decisions
 
 ```text
-Model B default: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
-Model B backup:  models/model_B_1km_gatekeeper_phase4.keras @ threshold 0.45
-Model A default: models/model_A_25m_spatial_unet.keras @ threshold 0.50
-Model A backup:  models/model_A_25m_spatial_unet.keras @ threshold 0.45
+Model B leading candidate: models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
+Model B recall backup:    models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
+Model B alternate backup: models/model_B_1km_gatekeeper_hardneg_phase4.keras @ threshold 0.20
+Model A default:          models/model_A_25m_spatial_unet.keras @ threshold 0.50
+Model A backup:           models/model_A_25m_spatial_unet.keras @ threshold 0.45
 Model A operational min positive pixels: 1
 ```
 
@@ -122,10 +123,9 @@ Phase 4 @ 0.45 is a strong backup but does not clearly beat Phase 2 @ 0.40 for t
 
 ### Takeaways
 
-1. Phase 2 threshold `0.40` is the current default Model B operating point.
-2. Phase 4 threshold `0.45` is the backup stricter operating point.
-3. Phase 3 appears too aggressive with `lambda_patch=0.50`.
-4. Do not automatically choose the final model; evaluate saved phase checkpoints.
+1. The initial default was Phase 2 threshold `0.40`.
+2. Phase 3 appears too aggressive with `lambda_patch=0.50`.
+3. Do not automatically choose the final model; evaluate saved phase checkpoints.
 
 ## Run 002 — Initial 25 m Model A Spatial Refiner Smoke Test
 
@@ -471,6 +471,172 @@ Possible next steps:
 2. Add those no-ignition patches to a hard-negative set.
 3. Fine-tune Model B with hard negatives or run another phased training pass with gentler suppression.
 4. Re-run the negative-heavy pipeline test.
+```
+
+## Run 006 — Hard-Negative Model B Pipeline Test
+
+Date: 2026-05-18
+
+### Purpose
+
+Retrain Model B with explicit hard-negative mixing and test whether this reduces patch-level false positives on the negative-heavy paired pipeline.
+
+### Hard-Negative Source
+
+Hard negatives were mined from the negative-heavy paired pipeline output by collecting no-ignition 1 km patches that the previous Model B incorrectly passed.
+
+Selection rule:
+
+```text
+model_b_passed = 1
+label_1km_positive = False
+```
+
+Mined hard negatives:
+
+```text
+88 patches
+```
+
+### Training Change
+
+Model B training was updated to explicitly support phase-wise hard-negative mixing.
+
+```text
+Phase 1: balanced training only
+Phase 2: balanced + light hard-negative mixing
+Phase 3: balanced + stronger hard-negative mixing
+Phase 4: balanced only for recall recovery
+```
+
+Hard-negative training command settings:
+
+```text
+--hard-negative-dir /mnt/work/wildfire/1km/model_b_hard_negatives_mined
+--phase2-hard-negative-ratio 0.10
+--phase3-hard-negative-ratio 0.25
+--phase4-hard-negative-ratio 0.00
+--output-model models/model_B_1km_gatekeeper_hardneg.keras
+```
+
+### Hard-Negative Threshold Sweep Findings
+
+Phase 2 hard-negative checkpoint:
+
+| Threshold | Recall | Precision | FP Rate | Pass Rate | TP | FP | FN |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.25 | 0.9679 | 0.9340 | 0.0696 | 0.5225 | 693 | 49 | 23 |
+| 0.30 | 0.9567 | 0.9580 | 0.0426 | 0.5035 | 685 | 30 | 31 |
+| 0.35 | 0.9413 | 0.9698 | 0.0298 | 0.4894 | 674 | 21 | 42 |
+| 0.40 | 0.9232 | 0.9735 | 0.0256 | 0.4782 | 661 | 18 | 55 |
+
+Phase 4 hard-negative checkpoint:
+
+| Threshold | Recall | Precision | FP Rate | Pass Rate | TP | FP | FN |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.10 | 0.9581 | 0.9062 | 0.1009 | 0.5331 | 686 | 71 | 30 |
+| 0.15 | 0.9511 | 0.9240 | 0.0795 | 0.5190 | 681 | 56 | 35 |
+| 0.20 | 0.9441 | 0.9337 | 0.0682 | 0.5099 | 676 | 48 | 40 |
+| 0.25 | 0.9344 | 0.9476 | 0.0526 | 0.4972 | 669 | 37 | 47 |
+
+### Selected Hard-Negative Candidate
+
+```text
+Model B: models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
+```
+
+Reason:
+
+```text
+Compared with the original Phase 2 @ 0.40 baseline, hardneg Phase 2 @ 0.30 improves precision, reduces false positives, reduces pass rate, and keeps recall in the same operational range.
+```
+
+### Negative-Heavy Pipeline Result With Hardneg Phase 2 @ 0.30
+
+```text
+rows: 804
+blocked_by_model_b: 680
+completed: 124
+Model B passed patches: 124 / 804 = 0.1542
+Model A ran patches: 124 / 804 = 0.1542
+Final positive patches: 121 / 804 = 0.1505
+Rows with 25 m labels: 124 / 804
+Missing paired 25 m patches: 0
+```
+
+Model B patch-level result:
+
+| Metric | Previous Model B | Hardneg Phase 2 @ 0.30 |
+|---|---:|---:|
+| TP | 96 | 94 |
+| FP | 88 | 30 |
+| TN | 616 | 674 |
+| FN | 4 | 6 |
+| patch precision | 0.5217 | 0.7581 |
+| patch recall | 0.9600 | 0.9400 |
+| patch FP rate | 0.1250 | 0.0426 |
+| pass rate | 0.2289 | 0.1542 |
+
+Model A effect on Model-B-passed false positives:
+
+```text
+Model B false-positive patch candidates: 30
+Removed by Model A: 3
+Kept as final positives: 27
+Patch removal rate: 0.1000
+```
+
+Final cascade patch-level result on available 25 m labels:
+
+| Metric | Value |
+|---|---:|
+| TP | 94 |
+| FP | 27 |
+| TN | 3 |
+| FN | 0 |
+| patch precision | 0.7769 |
+| patch recall | 1.0000 on Model-B-passed positives |
+| patch FP rate | 0.9000 among Model-B-passed negatives |
+| patch accuracy | 0.7823 |
+
+### Improvement Summary
+
+Compared with the previous negative-heavy pipeline:
+
+```text
+Model B false positives: 88 -> 30
+Final false positives: 85 -> 27
+Model B pass-through workload: 184 -> 124 patches
+Model B precision: 0.5217 -> 0.7581
+Model B recall: 0.9600 -> 0.9400
+```
+
+Interpretation:
+
+```text
+The hard-negative retraining successfully reduced false positives and workload. It costs 2 additional missed positives on this negative-heavy sample, so it should be treated as the leading candidate rather than final proof.
+```
+
+### Current Decision
+
+```text
+New leading Model B candidate: models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
+Keep old Model B Phase 2 @ threshold 0.40 as recall backup until one more comparison is run.
+Keep hardneg Phase 4 @ threshold 0.20 as alternate backup candidate.
+```
+
+### Next Evaluation Need
+
+Run the negative-heavy paired pipeline using:
+
+```text
+models/model_B_1km_gatekeeper_hardneg_phase4.keras @ threshold 0.20
+```
+
+Reason:
+
+```text
+The hard-negative Phase 4 checkpoint matched the old baseline recall in the validation sweep and may recover some recall compared with hardneg Phase 2 @ 0.30 while still reducing false positives.
 ```
 
 ## Future Run Template

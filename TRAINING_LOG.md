@@ -17,12 +17,17 @@ Current cascade:
 ## Current Operating Decisions
 
 ```text
-Model B leading candidate: models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
-Model B recall backup:    models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
-Model B alternate backup: models/model_B_1km_gatekeeper_hardneg_phase4.keras @ threshold 0.20
-Model A default:          models/model_A_25m_spatial_unet.keras @ threshold 0.50
-Model A backup:           models/model_A_25m_spatial_unet.keras @ threshold 0.45
+Model B default:       models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
+Model B recall backup: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
+Model A default:       models/model_A_25m_spatial_unet.keras @ threshold 0.50
+Model A backup:        models/model_A_25m_spatial_unet.keras @ threshold 0.45
 Model A operational min positive pixels: 1
+```
+
+Reason for current Model B default:
+
+```text
+The hard-negative Phase 2 checkpoint at threshold 0.30 gives the best current tradeoff on the negative-heavy paired test: it sharply reduces false positives and Model A workload while keeping recall near the previous operating range.
 ```
 
 Reason for Model A min positive pixels:
@@ -111,15 +116,6 @@ Phase 2 comparison:
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 0.40 | 0.9441 | 0.8848 | 0.1250 | 0.5380 | 764 | 676 | 88 | 616 | 40 |
 | 0.45 | 0.9260 | 0.8972 | 0.1080 | 0.5204 | 739 | 663 | 76 | 628 | 53 |
-
-Phase 4 backup operating point:
-
-```text
-model: models/model_B_1km_gatekeeper_phase4.keras
-threshold: 0.45
-```
-
-Phase 4 @ 0.45 is a strong backup but does not clearly beat Phase 2 @ 0.40 for the default setting.
 
 ### Takeaways
 
@@ -414,8 +410,6 @@ The pipeline was extended with:
 --model-a-min-positive-pixels
 ```
 
-This tested whether requiring more than one predicted positive 25 m pixel would suppress patch-level false positives.
-
 Finding:
 
 ```text
@@ -426,22 +420,6 @@ Reason:
 
 ```text
 Many true 25 m ignition patches have exactly one labeled ignition pixel, and Model A often predicts exactly one high-confidence positive pixel for those true positives. Requiring 2 or 3 pixels suppresses real ignition detections.
-```
-
-Example pattern observed in the CSV:
-
-```text
-label_25m_positive = True
-model_a_max_prob is high
-model_a_positive_pixels = 1
-model_a_min_positive_pixels = 3
-final_positive = 0
-```
-
-Interpretation:
-
-```text
-The min-pixel rule can be useful for analysis, but it should not be used as the production final decision rule unless the label definition changes from one-pixel ignition points to area masks.
 ```
 
 ### Decision
@@ -458,19 +436,6 @@ The negative-heavy test shows that Model B is recall-safe and reduces workload s
 ```text
 Model B should remain the focus for patch-level false-positive reduction.
 Model A should remain a pixel-level spatial refiner, not a second patch gatekeeper.
-```
-
-### Next Planned Change
-
-Improve Model B false-positive behavior by collecting and using hard negatives from Model-B-passed no-ignition patches.
-
-Possible next steps:
-
-```text
-1. Use the negative-heavy paired pipeline CSV to identify Model B false positives.
-2. Add those no-ignition patches to a hard-negative set.
-3. Fine-tune Model B with hard negatives or run another phased training pass with gentler suppression.
-4. Re-run the negative-heavy pipeline test.
 ```
 
 ## Run 006 — Hard-Negative Model B Pipeline Test
@@ -539,19 +504,15 @@ Phase 4 hard-negative checkpoint:
 | 0.20 | 0.9441 | 0.9337 | 0.0682 | 0.5099 | 676 | 48 | 40 |
 | 0.25 | 0.9344 | 0.9476 | 0.0526 | 0.4972 | 669 | 37 | 47 |
 
-### Selected Hard-Negative Candidate
+### Negative-Heavy Pipeline Comparison
 
-```text
-Model B: models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
-```
+| Model B candidate | TP | FP | TN | FN | Precision | Recall | FP rate | Pass rate |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Old Phase 2 @ 0.40 | 96 | 88 | 616 | 4 | 0.5217 | 0.9600 | 0.1250 | 0.2289 |
+| Hardneg Phase 2 @ 0.30 | 94 | 30 | 674 | 6 | 0.7581 | 0.9400 | 0.0426 | 0.1542 |
+| Hardneg Phase 4 @ 0.20 | 93 | 48 | 656 | 7 | 0.6596 | 0.9300 | 0.0682 | 0.1754 |
 
-Reason:
-
-```text
-Compared with the original Phase 2 @ 0.40 baseline, hardneg Phase 2 @ 0.30 improves precision, reduces false positives, reduces pass rate, and keeps recall in the same operational range.
-```
-
-### Negative-Heavy Pipeline Result With Hardneg Phase 2 @ 0.30
+### Phase 2 Hardneg Pipeline Result
 
 ```text
 rows: 804
@@ -564,19 +525,6 @@ Rows with 25 m labels: 124 / 804
 Missing paired 25 m patches: 0
 ```
 
-Model B patch-level result:
-
-| Metric | Previous Model B | Hardneg Phase 2 @ 0.30 |
-|---|---:|---:|
-| TP | 96 | 94 |
-| FP | 88 | 30 |
-| TN | 616 | 674 |
-| FN | 4 | 6 |
-| patch precision | 0.5217 | 0.7581 |
-| patch recall | 0.9600 | 0.9400 |
-| patch FP rate | 0.1250 | 0.0426 |
-| pass rate | 0.2289 | 0.1542 |
-
 Model A effect on Model-B-passed false positives:
 
 ```text
@@ -586,57 +534,63 @@ Kept as final positives: 27
 Patch removal rate: 0.1000
 ```
 
-Final cascade patch-level result on available 25 m labels:
+### Phase 4 Hardneg Pipeline Result
 
-| Metric | Value |
-|---|---:|
-| TP | 94 |
-| FP | 27 |
-| TN | 3 |
-| FN | 0 |
-| patch precision | 0.7769 |
-| patch recall | 1.0000 on Model-B-passed positives |
-| patch FP rate | 0.9000 among Model-B-passed negatives |
-| patch accuracy | 0.7823 |
+```text
+rows: 804
+blocked_by_model_b: 663
+completed: 141
+Model B passed patches: 141 / 804 = 0.1754
+Model A ran patches: 141 / 804 = 0.1754
+Final positive patches: 132 / 804 = 0.1642
+Rows with 25 m labels: 141 / 804
+Missing paired 25 m patches: 0
+```
+
+Model A effect on Model-B-passed false positives:
+
+```text
+Model B false-positive patch candidates: 48
+Removed by Model A: 9
+Kept as final positives: 39
+Patch removal rate: 0.1875
+```
 
 ### Improvement Summary
 
 Compared with the previous negative-heavy pipeline:
 
 ```text
-Model B false positives: 88 -> 30
-Final false positives: 85 -> 27
-Model B pass-through workload: 184 -> 124 patches
-Model B precision: 0.5217 -> 0.7581
-Model B recall: 0.9600 -> 0.9400
+Model B false positives: 88 -> 30 with hardneg Phase 2 @ 0.30
+Final false positives: 85 -> 27 with hardneg Phase 2 @ 0.30
+Model B pass-through workload: 184 -> 124 patches with hardneg Phase 2 @ 0.30
+Model B precision: 0.5217 -> 0.7581 with hardneg Phase 2 @ 0.30
+Model B recall: 0.9600 -> 0.9400 with hardneg Phase 2 @ 0.30
 ```
 
-Interpretation:
+Phase 4 @ 0.20 was tested as a possible recovery checkpoint, but it was worse than Phase 2 @ 0.30 on both recall and false positives:
 
 ```text
-The hard-negative retraining successfully reduced false positives and workload. It costs 2 additional missed positives on this negative-heavy sample, so it should be treated as the leading candidate rather than final proof.
+Hardneg Phase 2 @ 0.30: recall 0.9400, FP 30, pass rate 0.1542
+Hardneg Phase 4 @ 0.20: recall 0.9300, FP 48, pass rate 0.1754
 ```
 
 ### Current Decision
 
 ```text
-New leading Model B candidate: models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
-Keep old Model B Phase 2 @ threshold 0.40 as recall backup until one more comparison is run.
-Keep hardneg Phase 4 @ threshold 0.20 as alternate backup candidate.
+Set hardneg Phase 2 @ threshold 0.30 as the current Model B default.
+Reject hardneg Phase 4 @ threshold 0.20 as an alternate backup because it underperforms hardneg Phase 2 on the negative-heavy paired test.
+Keep old Phase 2 @ threshold 0.40 as a recall backup because it has the highest recall on the negative-heavy paired test.
 ```
 
 ### Next Evaluation Need
 
-Run the negative-heavy paired pipeline using:
-
-```text
-models/model_B_1km_gatekeeper_hardneg_phase4.keras @ threshold 0.20
-```
+Before moving to the final geospatial prototype, run the selected pipeline on a larger and/or more geographically diverse negative-heavy set.
 
 Reason:
 
 ```text
-The hard-negative Phase 4 checkpoint matched the old baseline recall in the validation sweep and may recover some recall compared with hardneg Phase 2 @ 0.30 while still reducing false positives.
+The hard-negative result is strong, but the current negative-heavy set has only 804 filename-paired patches. The next validation should test whether the false-positive reduction generalizes beyond the mined hard-negative distribution.
 ```
 
 ## Future Run Template

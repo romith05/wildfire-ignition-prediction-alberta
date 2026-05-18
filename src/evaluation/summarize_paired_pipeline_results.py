@@ -4,19 +4,18 @@ This reads the CSV produced by:
 
     src.inference.run_paired_patch_pipeline
 
-and reports:
+and reports patch-level cascade behavior:
 - Model B gatekeeper confusion matrix,
-- final cascade confusion matrix,
+- final patch-level cascade confusion matrix,
 - Model B pass rate,
-- final positive rate,
-- Model A removal rate on Model B false positives.
+- final positive patch rate,
+- Model A removal rate on Model B false-positive patches.
 
-The expected CSV columns include:
-- model_b_passed
-- final_positive
-- label_1km_positive
-- label_25m_positive
-- status
+Important:
+This script summarizes patch-level pass/fail behavior only. It does not compute
+Model A pixel-level Dice/IoU/precision/recall because the paired-pipeline CSV
+contains scalar patch outcomes, not full prediction masks. Use
+``src.evaluation.diagnose_model_a_validation`` for pixel-wise Model A metrics.
 """
 
 from __future__ import annotations
@@ -28,11 +27,11 @@ import pandas as pd
 
 
 def parse_bool_series(series: pd.Series) -> pd.Series:
-    """Parse bool-like CSV values into boolean Series."""
+    """Parse bool-like CSV values into a real boolean Series."""
     if series.dtype == bool:
-        return series
+        return series.astype(bool)
 
-    return series.astype(str).str.lower().map(
+    parsed = series.astype(str).str.strip().str.lower().map(
         {
             "true": True,
             "false": False,
@@ -43,22 +42,28 @@ def parse_bool_series(series: pd.Series) -> pd.Series:
         }
     )
 
+    if parsed.isna().any():
+        bad_values = sorted(series[parsed.isna()].astype(str).unique().tolist())
+        raise ValueError(f"Could not parse boolean values: {bad_values}")
+
+    return parsed.astype(bool)
+
 
 def confusion_counts(y_true: pd.Series, y_pred: pd.Series) -> dict[str, int]:
     """Return binary confusion counts."""
     y_true = y_true.astype(bool)
     y_pred = y_pred.astype(bool)
 
-    tp = int((y_true & y_pred).sum())
-    fp = int((~y_true & y_pred).sum())
-    tn = int((~y_true & ~y_pred).sum())
-    fn = int((y_true & ~y_pred).sum())
+    tp = int(((y_true == True) & (y_pred == True)).sum())
+    fp = int(((y_true == False) & (y_pred == True)).sum())
+    tn = int(((y_true == False) & (y_pred == False)).sum())
+    fn = int(((y_true == True) & (y_pred == False)).sum())
 
     return {"tp": tp, "fp": fp, "tn": tn, "fn": fn}
 
 
 def metrics_from_counts(counts: dict[str, int]) -> dict[str, float]:
-    """Compute precision, recall, fp_rate, and accuracy from counts."""
+    """Compute patch-level precision, recall, fp_rate, and accuracy from counts."""
     tp = counts["tp"]
     fp = counts["fp"]
     tn = counts["tn"]
@@ -79,7 +84,7 @@ def metrics_from_counts(counts: dict[str, int]) -> dict[str, float]:
 
 
 def print_counts_and_metrics(title: str, counts: dict[str, int]) -> None:
-    """Print one confusion matrix and derived metrics."""
+    """Print one patch-level confusion matrix and derived metrics."""
     metrics = metrics_from_counts(counts)
 
     print(f"\n{title}")
@@ -87,10 +92,10 @@ def print_counts_and_metrics(title: str, counts: dict[str, int]) -> None:
     print(f"FP: {counts['fp']}")
     print(f"TN: {counts['tn']}")
     print(f"FN: {counts['fn']}")
-    print(f"precision: {metrics['precision']:.4f}")
-    print(f"recall:    {metrics['recall']:.4f}")
-    print(f"fp_rate:   {metrics['fp_rate']:.4f}")
-    print(f"accuracy:  {metrics['accuracy']:.4f}")
+    print(f"patch_precision: {metrics['precision']:.4f}")
+    print(f"patch_recall:    {metrics['recall']:.4f}")
+    print(f"patch_fp_rate:   {metrics['fp_rate']:.4f}")
+    print(f"patch_accuracy:  {metrics['accuracy']:.4f}")
 
 
 def summarize(args: argparse.Namespace) -> None:
@@ -120,6 +125,7 @@ def summarize(args: argparse.Namespace) -> None:
     print("Paired pipeline summary")
     print(f"CSV: {csv_path}")
     print(f"rows: {len(df)}")
+    print("Metric type: patch-level cascade metrics")
 
     print("\nStatus counts")
     print(df["status"].value_counts(dropna=False).to_string())
@@ -131,44 +137,48 @@ def summarize(args: argparse.Namespace) -> None:
     missing_25m = int((df["status"] == "missing_matching_25m_patch").sum())
 
     print("\nPass rates")
-    print(f"Model B passed: {model_b_passed}/{total} = {model_b_passed / total if total else 0:.4f}")
-    print(f"Model A ran:    {completed}/{total} = {completed / total if total else 0:.4f}")
-    print(f"Final positive: {final_positive}/{total} = {final_positive / total if total else 0:.4f}")
-    print(f"Missing 25 m:   {missing_25m}")
+    print(f"Model B passed patches: {model_b_passed}/{total} = {model_b_passed / total if total else 0:.4f}")
+    print(f"Model A ran patches:    {completed}/{total} = {completed / total if total else 0:.4f}")
+    print(f"Final positive patches: {final_positive}/{total} = {final_positive / total if total else 0:.4f}")
+    print(f"Missing 25 m patches:   {missing_25m}")
 
     model_b_counts = confusion_counts(
         y_true=df["label_1km_positive_bool"],
         y_pred=df["model_b_passed_bool"],
     )
-    print_counts_and_metrics("Model B gatekeeper vs 1 km labels", model_b_counts)
+    print_counts_and_metrics("Model B gatekeeper vs 1 km patch labels", model_b_counts)
 
     final_counts = confusion_counts(
         y_true=df["label_25m_positive_bool"],
         y_pred=df["final_positive_bool"],
     )
-    print_counts_and_metrics("Final cascade vs 25 m labels", final_counts)
+    print_counts_and_metrics("Final cascade vs 25 m patch labels", final_counts)
 
-    passed = df[df["model_b_passed_bool"]].copy()
+    passed = df[df["model_b_passed_bool"] == True].copy()
     if len(passed) > 0:
         passed_counts = confusion_counts(
             y_true=passed["label_25m_positive_bool"],
             y_pred=passed["final_positive_bool"],
         )
-        print_counts_and_metrics("Model A on Model-B-passed patches", passed_counts)
+        print_counts_and_metrics("Model A patch outcome on Model-B-passed patches", passed_counts)
 
-        model_b_false_positives = passed[~passed["label_25m_positive_bool"]]
+        model_b_false_positives = passed[passed["label_25m_positive_bool"] == False]
         if len(model_b_false_positives) > 0:
-            removed = int((~model_b_false_positives["final_positive_bool"]).sum())
+            removed = int((model_b_false_positives["final_positive_bool"] == False).sum())
             total_fp_candidates = len(model_b_false_positives)
             kept = total_fp_candidates - removed
-            print("\nModel A removal of Model B false positives")
-            print(f"Model B false-positive candidates: {total_fp_candidates}")
+            print("\nModel A removal of Model B false-positive patches")
+            print(f"Model B false-positive patch candidates: {total_fp_candidates}")
             print(f"Removed by Model A: {removed}")
             print(f"Kept as final positives: {kept}")
-            print(f"Removal rate: {removed / total_fp_candidates:.4f}")
+            print(f"Patch removal rate: {removed / total_fp_candidates:.4f}")
         else:
-            print("\nModel A removal of Model B false positives")
-            print("No Model B false-positive candidates in this CSV.")
+            print("\nModel A removal of Model B false-positive patches")
+            print("No Model B false-positive patch candidates in this CSV.")
+
+    print("\nPixel-wise Model A metrics")
+    print("Not computed here. This CSV stores patch-level scalar outcomes only.")
+    print("Use src.evaluation.diagnose_model_a_validation for pixel-wise Dice/IoU/precision/recall.")
 
     print("\nNote")
     print("This summarizes the test-only filename-paired pipeline. It does not replace final geospatial prototype evaluation.")

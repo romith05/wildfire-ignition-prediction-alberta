@@ -370,6 +370,97 @@ Model B Phase 2 @ threshold 0.40
 Model A 25 m spatial refiner @ threshold 0.50
 ```
 
+## Run 004 — Test-Only Paired Patch Pipeline Baseline
+
+Date: 2026-05-18
+
+### Purpose
+
+Run the first end-to-end coarse-to-fine smoke test using filename-paired 1 km and 25 m patches.
+
+This is a controlled test only. It uses matching filenames between the two patch folders instead of real geospatial scaling from 1 km footprints to generated 25 m patches.
+
+### Model Settings
+
+```text
+Model B: models/model_B_1km_gatekeeper_phase2.keras @ threshold 0.40
+Model A: models/model_A_25m_spatial_unet.keras @ threshold 0.50
+```
+
+### Pipeline Summary
+
+```text
+rows: 1000
+completed: 701
+blocked_by_model_b: 299
+Model B passed patches: 701 / 1000 = 0.7010
+Model A ran patches: 701 / 1000 = 0.7010
+Final positive patches: 699 / 1000 = 0.6990
+Rows with 25 m labels: 701 / 1000
+Missing paired 25 m patches: 0
+```
+
+### Model B Patch-Level Gatekeeper Result
+
+| Metric | Value |
+|---|---:|
+| TP | 676 |
+| FP | 25 |
+| TN | 259 |
+| FN | 40 |
+| patch precision | 0.9643 |
+| patch recall | 0.9441 |
+| patch FP rate | 0.0880 |
+| patch accuracy | 0.9350 |
+
+### Final Cascade Patch-Level Result on Available 25 m Labels
+
+| Metric | Value |
+|---|---:|
+| TP | 676 |
+| FP | 23 |
+| TN | 2 |
+| FN | 0 |
+| patch precision | 0.9671 |
+| patch recall | 1.0000 |
+| patch FP rate | 0.9200 |
+| patch accuracy | 0.9672 |
+
+### Model A Effect on Model-B-Passed Patches
+
+```text
+Model B false-positive patch candidates: 25
+Removed by Model A: 2
+Kept as final positives: 23
+Patch removal rate: 0.0800
+```
+
+### Interpretation
+
+- The paired test pipeline works mechanically: Model B runs, matching 25 m patches are found, Model A runs, and results are summarized.
+- Model B is doing most of the patch-level gatekeeping.
+- Model A preserves all true-positive patches passed by Model B in this test.
+- Model A removes only a small fraction of Model B false-positive patches at the patch level.
+- This is acceptable because Model A is primarily a pixel-level spatial refiner, not a second patch gatekeeper.
+- The high final cascade patch FP rate of `0.9200` is computed only among the 25 Model-B-passed negative patches, not the full 1000-patch test set.
+
+### Decision
+
+```text
+Keep this as the first paired-pipeline baseline.
+Proceed to a negative-heavy test set before judging Alberta-wide operational false alarms.
+```
+
+### Next Evaluation Need
+
+Run the same paired pipeline on a negative-heavy or more realistic validation sample.
+
+Reason:
+
+```text
+The current 1000-patch sample is positive-heavy. Alberta-wide deployment will be overwhelmingly negative, so the next test must stress false-positive behavior under a more realistic class distribution.
+```
+
 ## Future Run Template
 
 ### Run XXX — Name
@@ -422,7 +513,7 @@ paste command here
 | Model B Phase 1 |  |  |  |  |  |
 | Model B Phase 2 |  |  |  |  |  |
 | Model B Phase 3 |  |  |  |  |  |
-| Model B Phase 4 |  |  |  |  |  |
+| Model B Phase 4 |  |  |  |  |
 | Model A |  |  |  |  |  |
 
 ### Interpretation

@@ -16,7 +16,8 @@ Current test flow:
 1. scan 1 km patches with Model B,
 2. if Model B max probability >= threshold, find same filename in 25 m folder,
 3. run Model A on the matched 25 m patch,
-4. write per-patch CSV results.
+4. call the patch final-positive only if Model A predicts enough positive pixels,
+5. write per-patch CSV results.
 """
 
 from __future__ import annotations
@@ -119,6 +120,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
         "model_b_passed",
         "model_a_max_prob",
         "model_a_positive_pixels",
+        "model_a_min_positive_pixels",
         "final_positive",
         "label_1km_positive",
         "label_25m_positive",
@@ -139,6 +141,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
                 "model_b_passed": 0,
                 "model_a_max_prob": "",
                 "model_a_positive_pixels": "",
+                "model_a_min_positive_pixels": args.model_a_min_positive_pixels,
                 "final_positive": 0,
                 "label_1km_positive": "",
                 "label_25m_positive": "",
@@ -182,7 +185,7 @@ def run_pipeline(args: argparse.Namespace) -> None:
 
                 model_a_max, pred_25m = predict_max(model_a, patch_25m)
                 model_a_positive_pixels = count_positive_pixels(pred_25m, args.model_a_threshold)
-                is_final_positive = model_a_positive_pixels > 0
+                is_final_positive = model_a_positive_pixels >= args.model_a_min_positive_pixels
 
                 row["model_a_max_prob"] = f"{model_a_max:.8f}"
                 row["model_a_positive_pixels"] = model_a_positive_pixels
@@ -211,6 +214,8 @@ def run_pipeline(args: argparse.Namespace) -> None:
     print(f"passed Model B: {passed_model_b}")
     print(f"missing paired 25 m patches: {missing_25m}")
     print(f"ran Model A: {ran_model_a}")
+    print(f"Model A threshold: {args.model_a_threshold}")
+    print(f"Model A min positive pixels: {args.model_a_min_positive_pixels}")
     print(f"final positive patches: {final_positive}")
     print(f"output CSV: {output_path}")
     print("\nReminder: this is a test-only filename-paired pipeline, not the final geospatial prototype.")
@@ -227,6 +232,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", default="results/paired_patch_pipeline_results.csv")
     parser.add_argument("--model-b-threshold", type=float, default=0.40)
     parser.add_argument("--model-a-threshold", type=float, default=0.50)
+    parser.add_argument(
+        "--model-a-min-positive-pixels",
+        type=int,
+        default=1,
+        help="Minimum number of Model A pixels >= threshold required for final_positive.",
+    )
     parser.add_argument("--pattern", default="patch_*.npz", help="Patch file glob pattern.")
     parser.add_argument("--label-key", default="class", help="NPZ label/mask key.")
     parser.add_argument("--max-files", type=int, default=None, help="Optional max 1 km files to scan.")
@@ -236,6 +247,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.model_a_min_positive_pixels < 1:
+        raise ValueError("--model-a-min-positive-pixels must be >= 1")
     run_pipeline(args)
 
 

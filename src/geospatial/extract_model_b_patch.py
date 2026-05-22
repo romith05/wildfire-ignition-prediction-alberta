@@ -4,6 +4,11 @@ This module converts coarse grid footprints into ``.npz`` tensors for the
 Model B gatekeeper. It is intentionally config-driven so local raster paths are
 not hardcoded in the repository.
 
+Important:
+    Output NPZ files contain feature arrays only. Metadata is written to the
+    manifest CSV, not inside the NPZ, because the project data loaders treat
+    every non-label NPZ key as a model input feature.
+
 Expected feature config JSON:
 
 {
@@ -235,7 +240,7 @@ def build_patch_metadata(
     resolution_m: float,
     grid_crs: Any,
 ) -> dict[str, Any]:
-    """Create lightweight JSON-serializable metadata for an output patch."""
+    """Create lightweight JSON-serializable metadata for the manifest."""
     return {
         "patch_id": str(row.patch_id),
         "xmin": float(row.xmin),
@@ -258,12 +263,20 @@ def extract_patch(
     resolution_m: float,
     grid_crs: Any,
     overwrite: bool,
-) -> Path:
+) -> tuple[Path, dict[str, Any]]:
     """Extract all configured features for one coarse grid row and save NPZ."""
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{row.patch_id}.npz"
+    metadata = build_patch_metadata(
+        row=row,
+        feature_specs=feature_specs,
+        patch_size=patch_size,
+        resolution_m=resolution_m,
+        grid_crs=grid_crs,
+    )
+
     if output_path.exists() and not overwrite:
-        return output_path
+        return output_path, metadata
 
     bounds = (float(row.xmin), float(row.ymin), float(row.xmax), float(row.ymax))
     arrays: dict[str, np.ndarray] = {}
@@ -277,23 +290,16 @@ def extract_patch(
             resolution_m=resolution_m,
         )
 
-    metadata = build_patch_metadata(
-        row=row,
-        feature_specs=feature_specs,
-        patch_size=patch_size,
-        resolution_m=resolution_m,
-        grid_crs=grid_crs,
-    )
-    arrays["_metadata_json"] = np.array(json.dumps(metadata), dtype=object)
-
+    # Do not store metadata in the NPZ. Project loaders treat every non-label
+    # key as an input feature, so NPZ files must contain feature arrays only.
     np.savez_compressed(output_path, **arrays)
-    return output_path
+    return output_path, metadata
 
 
 def write_manifest(rows: list[dict[str, Any]], output_path: Path) -> None:
     """Write extraction manifest CSV."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["patch_id", "status", "npz_path", "message"]
+    fieldnames = ["patch_id", "status", "npz_path", "message", "metadata_json"]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -348,7 +354,7 @@ def main() -> None:
     for row in selected.itertuples(index=False):
         patch_id = str(row.patch_id)
         try:
-            npz_path = extract_patch(
+            npz_path, metadata = extract_patch(
                 row=row,
                 feature_specs=feature_specs,
                 output_dir=output_dir,
@@ -363,6 +369,7 @@ def main() -> None:
                     "status": "completed",
                     "npz_path": str(npz_path),
                     "message": "",
+                    "metadata_json": json.dumps(metadata),
                 }
             )
         except Exception as exc:  # noqa: BLE001 - keep extraction robust over large grids.
@@ -372,6 +379,7 @@ def main() -> None:
                     "status": "failed",
                     "npz_path": "",
                     "message": str(exc),
+                    "metadata_json": "",
                 }
             )
             print(f"Failed {patch_id}: {exc}")

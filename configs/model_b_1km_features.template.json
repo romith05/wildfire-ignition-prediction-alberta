@@ -11,7 +11,7 @@
     {
       "key": "elevation",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/elevation_1km.tif",
+      "path": "mnt/work/wildfire/1km/static/DEM_1km.tif",
       "band": 1,
       "resampling": "bilinear",
       "fill_value": 0.0
@@ -19,7 +19,7 @@
     {
       "key": "landcover",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/landcover_1km.tif",
+      "path": "mnt/work/wildfire/1km/static/landcover_1km.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -27,7 +27,7 @@
     {
       "key": "water_mask",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/water_mask_1km.tif",
+      "path": "mnt/work/wildfire/1km/static/water_1km.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -35,7 +35,7 @@
     {
       "key": "municipality_band_1",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipality_1km_multiband.tif",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -43,7 +43,7 @@
     {
       "key": "municipality_band_2",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipality_1km_multiband.tif",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
       "band": 2,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -51,7 +51,47 @@
     {
       "key": "municipality_band_3",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipality_1km_multiband.tif",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "band": 3,
+      "resampling": "nearest",
+      "fill_value": 0.0
+    },
+    {
+      "key": "municipality_band_4",
+      "source": "raster",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "band": 3,
+      "resampling": "nearest",
+      "fill_value": 0.0
+    },
+    {
+      "key": "municipality_band_5",
+      "source": "raster",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "band": 3,
+      "resampling": "nearest",
+      "fill_value": 0.0
+    },
+    {
+      "key": "municipality_band_6",
+      "source": "raster",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "band": 3,
+      "resampling": "nearest",
+      "fill_value": 0.0
+    },
+    {
+      "key": "municipality_band_7",
+      "source": "raster",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "band": 3,
+      "resampling": "nearest",
+      "fill_value": 0.0
+    },
+    {
+      "key": "municipality_band_8",
+      "source": "raster",
+      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
       "band": 3,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -59,7 +99,7 @@
     {
       "key": "distance_to_road",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/distance_to_road_1km.tif",
+      "path": "mnt/work/wildfire/1km/static/distance_to_road_1km.tif",
       "band": 1,
       "resampling": "bilinear",
       "fill_value": 0.0

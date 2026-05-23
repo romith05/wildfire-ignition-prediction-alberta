@@ -4,7 +4,8 @@
     "Keep feature keys consistent with the keys used during Model B training and channel_stats_1km.json.",
     "Do not commit local absolute paths, API keys, or private raster locations.",
     "Static layers should point to aligned 1 km rasters in the same CRS/grid family used for training.",
-    "Weather features are represented as constant arrays for now; later they should be filled from a realtime weather provider before extraction."
+    "Weather features are represented as constant arrays for now; later they should be filled from a realtime weather provider before extraction.",
+    "Multiband rasters must be represented as one feature entry per model channel. Use the same path with different band values."
   ],
   "features": [
     {
@@ -32,10 +33,26 @@
       "fill_value": 0.0
     },
     {
-      "key": "municipality",
+      "key": "municipality_band_1",
       "source": "raster",
-      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipality_1km.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipality_1km_multiband.tif",
       "band": 1,
+      "resampling": "nearest",
+      "fill_value": 0.0
+    },
+    {
+      "key": "municipality_band_2",
+      "source": "raster",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipality_1km_multiband.tif",
+      "band": 2,
+      "resampling": "nearest",
+      "fill_value": 0.0
+    },
+    {
+      "key": "municipality_band_3",
+      "source": "raster",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipality_1km_multiband.tif",
+      "band": 3,
       "resampling": "nearest",
       "fill_value": 0.0
     },

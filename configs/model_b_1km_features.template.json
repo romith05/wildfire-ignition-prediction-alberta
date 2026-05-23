@@ -1,17 +1,18 @@
 {
-  "description": "Template feature config for extracting Model B 1 km coarse inference patches. Copy this file to configs/model_b_1km_features.json and replace placeholder raster paths and weather values locally.",
+  "description": "Template feature config for extracting Model B 1 km coarse inference patches. Copy this file to configs/model_b_1km_features.json and replace placeholder raster paths and runtime values locally.",
   "important_notes": [
     "Keep feature keys consistent with the keys used during Model B training and channel_stats_1km.json.",
     "Do not commit local absolute paths, API keys, or private raster locations.",
     "Static layers should point to aligned 1 km rasters in the same CRS/grid family used for training.",
     "Weather features are represented as constant arrays for now; later they should be filled from a realtime weather provider before extraction.",
+    "Temporal features are represented as constant arrays for the target inference date. Compute them from day-of-year using the same convention used during training.",
     "Multiband rasters must be represented as one feature entry per model channel. Use the same path with different band values."
   ],
   "features": [
     {
       "key": "elevation",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/DEM_1km.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/DEM_1km.tif",
       "band": 1,
       "resampling": "bilinear",
       "fill_value": 0.0
@@ -19,7 +20,7 @@
     {
       "key": "landcover",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/landcover_1km.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/landcover_1km.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -27,7 +28,7 @@
     {
       "key": "water_mask",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/water_1km.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/water_1km.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -35,7 +36,7 @@
     {
       "key": "municipality_band_1",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -43,7 +44,7 @@
     {
       "key": "municipality_band_2",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
       "band": 2,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -51,7 +52,7 @@
     {
       "key": "municipality_band_3",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
       "band": 3,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -59,47 +60,47 @@
     {
       "key": "municipality_band_4",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
-      "band": 3,
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
+      "band": 4,
       "resampling": "nearest",
       "fill_value": 0.0
     },
     {
       "key": "municipality_band_5",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
-      "band": 3,
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
+      "band": 5,
       "resampling": "nearest",
       "fill_value": 0.0
     },
     {
       "key": "municipality_band_6",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
-      "band": 3,
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
+      "band": 6,
       "resampling": "nearest",
       "fill_value": 0.0
     },
     {
       "key": "municipality_band_7",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
-      "band": 3,
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
+      "band": 7,
       "resampling": "nearest",
       "fill_value": 0.0
     },
     {
       "key": "municipality_band_8",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/municipalities_multiband.tif",
-      "band": 3,
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/municipalities_multiband.tif",
+      "band": 8,
       "resampling": "nearest",
       "fill_value": 0.0
     },
     {
       "key": "distance_to_road",
       "source": "raster",
-      "path": "mnt/work/wildfire/1km/static/distance_to_road_1km.tif",
+      "path": "/ABSOLUTE/PATH/TO/STATIC_1KM/distance_to_road_1km.tif",
       "band": 1,
       "resampling": "bilinear",
       "fill_value": 0.0
@@ -118,6 +119,16 @@
       "key": "wind_speed",
       "source": "constant",
       "value": 10.0
+    },
+    {
+      "key": "day_of_year_sin",
+      "source": "constant",
+      "value": 0.0
+    },
+    {
+      "key": "day_of_year_cos",
+      "source": "constant",
+      "value": 1.0
     }
   ]
 }

@@ -1,4 +1,4 @@
-"""Extract Model B 1 km inference patches from aligned raster features.
+"""Extract Model B 1 km inference patches from aligned raster and runtime features.
 
 This module converts coarse grid footprints into ``.npz`` tensors for the
 Model B gatekeeper. It is intentionally config-driven so local raster paths are
@@ -9,23 +9,27 @@ Important:
     manifest CSV, not inside the NPZ, because the project data loaders treat
     every non-label NPZ key as a model input feature.
 
+Supported feature sources:
+    - ``raster``: sample an aligned GeoTIFF/raster into the patch grid.
+    - ``constant``: fill the patch with one scalar value. This is useful for
+      realtime weather values fetched from an API for the patch/time.
+
 Expected feature config JSON:
 
 {
   "features": [
     {
       "key": "elevation",
+      "source": "raster",
       "path": "/path/to/aligned/elevation_1km.tif",
       "band": 1,
       "resampling": "bilinear",
       "fill_value": 0.0
     },
     {
-      "key": "landcover",
-      "path": "/path/to/aligned/landcover_1km.tif",
-      "band": 1,
-      "resampling": "nearest",
-      "fill_value": 0.0
+      "key": "temperature",
+      "source": "constant",
+      "value": 24.5
     }
   ]
 }
@@ -66,14 +70,17 @@ from rasterio.warp import reproject
 DEFAULT_PATCH_SIZE = 32
 DEFAULT_RESOLUTION_M = 1000.0
 DEFAULT_FILL_VALUE = 0.0
+VALID_FEATURE_SOURCES = {"raster", "constant"}
 
 
 @dataclass(frozen=True)
 class FeatureSpec:
-    """Configuration for one raster feature layer."""
+    """Configuration for one model input feature."""
 
     key: str
-    path: Path
+    source: str = "raster"
+    path: Path | None = None
+    value: float | None = None
     band: int = 1
     resampling: str = "bilinear"
     fill_value: float = DEFAULT_FILL_VALUE
@@ -89,7 +96,7 @@ RESAMPLING_MAP: dict[str, Resampling] = {
 
 
 def load_feature_config(path: str | Path) -> list[FeatureSpec]:
-    """Load feature raster configuration from JSON."""
+    """Load raster/constant feature configuration from JSON."""
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Feature config not found: {path}")
@@ -109,30 +116,51 @@ def load_feature_config(path: str | Path) -> list[FeatureSpec]:
             raise ValueError(f"Feature config entry {i} must be an object.")
 
         key = item.get("key")
-        raster_path = item.get("path")
         if not key or not isinstance(key, str):
             raise ValueError(f"Feature config entry {i} is missing string key.")
-        if not raster_path or not isinstance(raster_path, str):
-            raise ValueError(f"Feature config entry {i} is missing string path.")
         if key in seen_keys:
             raise ValueError(f"Duplicate feature key in config: {key}")
+
+        source = str(item.get("source", "raster")).lower()
+        if source not in VALID_FEATURE_SOURCES:
+            valid = ", ".join(sorted(VALID_FEATURE_SOURCES))
+            raise ValueError(f"Invalid source '{source}' for feature '{key}'. Valid: {valid}")
 
         resampling = item.get("resampling", "bilinear")
         if resampling not in RESAMPLING_MAP:
             valid = ", ".join(sorted(RESAMPLING_MAP))
             raise ValueError(f"Invalid resampling '{resampling}' for {key}. Valid: {valid}")
 
-        spec = FeatureSpec(
-            key=key,
-            path=Path(raster_path),
-            band=int(item.get("band", 1)),
-            resampling=resampling,
-            fill_value=float(item.get("fill_value", DEFAULT_FILL_VALUE)),
-        )
-        if not spec.path.exists():
-            raise FileNotFoundError(f"Raster for feature '{key}' not found: {spec.path}")
-        if spec.band < 1:
-            raise ValueError(f"Band index must be >= 1 for feature '{key}'")
+        path_value = item.get("path")
+        value = item.get("value")
+
+        if source == "raster":
+            if not path_value or not isinstance(path_value, str):
+                raise ValueError(f"Raster feature '{key}' is missing string path.")
+            raster_path = Path(path_value)
+            if not raster_path.exists():
+                raise FileNotFoundError(f"Raster for feature '{key}' not found: {raster_path}")
+            band = int(item.get("band", 1))
+            if band < 1:
+                raise ValueError(f"Band index must be >= 1 for raster feature '{key}'")
+
+            spec = FeatureSpec(
+                key=key,
+                source=source,
+                path=raster_path,
+                band=band,
+                resampling=resampling,
+                fill_value=float(item.get("fill_value", DEFAULT_FILL_VALUE)),
+            )
+        else:
+            if value is None:
+                raise ValueError(f"Constant feature '{key}' is missing numeric value.")
+            spec = FeatureSpec(
+                key=key,
+                source=source,
+                value=float(value),
+                fill_value=float(item.get("fill_value", DEFAULT_FILL_VALUE)),
+            )
 
         specs.append(spec)
         seen_keys.add(key)
@@ -187,14 +215,12 @@ def select_grid_rows(
     return selected.reset_index(drop=True)
 
 
-def extract_feature_array(
-    spec: FeatureSpec,
+def validate_bounds_size(
     bounds: tuple[float, float, float, float],
-    dst_crs: Any,
     patch_size: int,
     resolution_m: float,
-) -> np.ndarray:
-    """Sample one raster feature into a fixed-size Model B patch array."""
+) -> None:
+    """Validate that grid bounds match the expected model footprint."""
     xmin, ymin, xmax, ymax = bounds
     expected_width = patch_size * resolution_m
     expected_height = patch_size * resolution_m
@@ -207,6 +233,19 @@ def extract_feature_array(
             f"patch_size * resolution_m = {expected_width} x {expected_height}."
         )
 
+
+def extract_raster_feature_array(
+    spec: FeatureSpec,
+    bounds: tuple[float, float, float, float],
+    dst_crs: Any,
+    patch_size: int,
+    resolution_m: float,
+) -> np.ndarray:
+    """Sample one raster feature into a fixed-size Model B patch array."""
+    if spec.path is None:
+        raise ValueError(f"Raster feature '{spec.key}' has no path.")
+
+    xmin, _, _, ymax = bounds
     dst_transform = from_origin(xmin, ymax, resolution_m, resolution_m)
     dst = np.full((patch_size, patch_size), spec.fill_value, dtype=np.float32)
 
@@ -233,6 +272,29 @@ def extract_feature_array(
     return dst.astype(np.float32)
 
 
+def extract_constant_feature_array(spec: FeatureSpec, patch_size: int) -> np.ndarray:
+    """Create a fixed-size array for a scalar realtime/runtime feature."""
+    if spec.value is None:
+        raise ValueError(f"Constant feature '{spec.key}' has no value.")
+    return np.full((patch_size, patch_size), spec.value, dtype=np.float32)
+
+
+def extract_feature_array(
+    spec: FeatureSpec,
+    bounds: tuple[float, float, float, float],
+    dst_crs: Any,
+    patch_size: int,
+    resolution_m: float,
+) -> np.ndarray:
+    """Extract one feature array according to its configured source."""
+    validate_bounds_size(bounds, patch_size, resolution_m)
+    if spec.source == "raster":
+        return extract_raster_feature_array(spec, bounds, dst_crs, patch_size, resolution_m)
+    if spec.source == "constant":
+        return extract_constant_feature_array(spec, patch_size)
+    raise ValueError(f"Unsupported feature source for '{spec.key}': {spec.source}")
+
+
 def build_patch_metadata(
     row: Any,
     feature_specs: list[FeatureSpec],
@@ -251,7 +313,8 @@ def build_patch_metadata(
         "resolution_m": float(resolution_m),
         "crs": str(grid_crs),
         "feature_keys": [spec.key for spec in feature_specs],
-        "feature_paths": [str(spec.path) for spec in feature_specs],
+        "feature_sources": [spec.source for spec in feature_specs],
+        "feature_paths": [str(spec.path) if spec.path is not None else "" for spec in feature_specs],
     }
 
 
@@ -312,7 +375,7 @@ def parse_args() -> argparse.Namespace:
         description="Extract Model B 1 km NPZ patches from Alberta coarse grid footprints."
     )
     parser.add_argument("--grid", required=True, help="Coarse grid GeoJSON/Parquet path.")
-    parser.add_argument("--feature-config", required=True, help="JSON config listing aligned raster features.")
+    parser.add_argument("--feature-config", required=True, help="JSON config listing aligned raster and runtime features.")
     parser.add_argument("--output-dir", default="data/patches/1km", help="Output folder for NPZ patches.")
     parser.add_argument("--patch-id", default=None, help="Extract one patch by patch_id.")
     parser.add_argument("--all", action="store_true", help="Extract all grid patches.")

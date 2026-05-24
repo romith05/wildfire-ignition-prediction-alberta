@@ -7,7 +7,7 @@
     "Weather features are represented as constant arrays for now; later they should be filled from a realtime weather provider before extraction.",
     "Temporal month features are represented as constant arrays for the target inference date. Compute sin_month and cos_month using the same convention used during training.",
     "Multiband rasters must be represented as one feature entry per model channel. Use the same path with different band values.",
-    "This template intentionally mirrors the known 1 km key pattern. Validate against the 25 m channel_stats.json before extracting patches."
+    "Validate against the 25 m channel_stats.json before extracting patches. In the current Model A stats, the road-distance key is distance_to_road, while the raster file path may still be distance_to_road.tif."
   ],
   "features": [
     {
@@ -24,7 +24,7 @@
       "value": -0.8660254037844387
     },
     {
-      "key": "distance_to_road_25m",
+      "key": "distance_to_road",
       "source": "raster",
       "path": "/mnt/work/wildfire/25m/static_25/distance_to_road.tif",
       "band": 1,

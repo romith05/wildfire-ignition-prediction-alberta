@@ -13,7 +13,7 @@
     {
       "key": "DEM_25m",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/DEM_25m.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/DEM_25m.tif",
       "band": 1,
       "resampling": "bilinear",
       "fill_value": 0.0
@@ -21,12 +21,12 @@
     {
       "key": "cos_month",
       "source": "constant",
-      "value": 1.0
+      "value": -0.8660254037844387
     },
     {
       "key": "distance_to_road_25m",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/distance_to_road_25m.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/distance_to_road_25m.tif",
       "band": 1,
       "resampling": "bilinear",
       "fill_value": 0.0
@@ -34,7 +34,7 @@
     {
       "key": "landcover_25m",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/landcover_25m.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/landcover_25m.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -42,7 +42,7 @@
     {
       "key": "municipalities_multiband_band1",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -50,7 +50,7 @@
     {
       "key": "municipalities_multiband_band2",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 2,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -58,7 +58,7 @@
     {
       "key": "municipalities_multiband_band3",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 3,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -66,7 +66,7 @@
     {
       "key": "municipalities_multiband_band4",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 4,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -74,7 +74,7 @@
     {
       "key": "municipalities_multiband_band5",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 5,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -82,7 +82,7 @@
     {
       "key": "municipalities_multiband_band6",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 6,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -90,7 +90,7 @@
     {
       "key": "municipalities_multiband_band7",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 7,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -98,7 +98,7 @@
     {
       "key": "municipalities_multiband_band8",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/municipalities_multiband.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/municipalities_multiband.tif",
       "band": 8,
       "resampling": "nearest",
       "fill_value": 0.0
@@ -111,7 +111,7 @@
     {
       "key": "sin_month",
       "source": "constant",
-      "value": 0.0
+      "value": 0.49999999999999994
     },
     {
       "key": "temperature",
@@ -121,7 +121,7 @@
     {
       "key": "water_25m",
       "source": "raster",
-      "path": "/mnt/work/wildfire/25m/static/water_25m.tif",
+      "path": "/mnt/work/wildfire/25m/static_25/water_25m.tif",
       "band": 1,
       "resampling": "nearest",
       "fill_value": 0.0

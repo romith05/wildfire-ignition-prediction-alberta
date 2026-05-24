@@ -386,6 +386,12 @@ def print_summary(rows: list[dict[str, Any]], output_csv: str | Path) -> None:
     print(f"Final positive patches: {len(final_positive)}")
     if completed:
         print(f"Final positive rate: {len(final_positive) / len(completed):.4f}")
+    if failed:
+        print("First failure messages:")
+        for row in failed[:5]:
+            candidate_id = row.get("candidate_id", "")
+            message = row.get("message", "")
+            print(f"  {candidate_id}: {message}")
     print(f"Output CSV: {output_csv}")
 
 

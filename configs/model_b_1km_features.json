@@ -21,7 +21,7 @@
     {
       "key": "cos_month",
       "source": "constant",
-      "value": 1.0
+      "value": -0.8660254037844387
     },
     {
       "key": "distance_to_road_1km",
@@ -111,7 +111,7 @@
     {
       "key": "sin_month",
       "source": "constant",
-      "value": 0.0
+      "value": 0.49999999999999994
     },
     {
       "key": "temperature",

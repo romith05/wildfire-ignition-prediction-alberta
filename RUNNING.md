@@ -61,6 +61,7 @@ Run this after pulling or after code changes:
 python -m py_compile src/geospatial/create_alberta_coarse_grid.py
 python -m py_compile src/geospatial/extract_model_b_patch.py
 python -m py_compile src/geospatial/validate_model_b_feature_config.py
+python -m py_compile src/geospatial/validate_model_a_feature_config.py
 python -m py_compile src/inference/run_model_b_geospatial.py
 python -m py_compile src/geospatial/create_model_a_25m_patches_from_candidates.py
 python -m py_compile src/inference/run_paired_patch_pipeline.py
@@ -417,7 +418,7 @@ cell_ymax
 crs
 ```
 
-## 8. Prepare the 25 m Model A Feature Config
+## 8. Prepare and Validate the 25 m Model A Feature Config
 
 Template file committed to the repo:
 
@@ -459,34 +460,22 @@ water_25m
 wind_speed
 ```
 
-Before generating many 25 m patches, compare this config against the actual 25 m `channel_stats.json` used to train Model A. A dedicated Model A config validator has not been added yet.
-
-Manual key check:
+Validate the local 25 m feature config before creating Model A patches:
 
 ```bash
-python - <<'PY'
-import json
-
-config_path = "configs/model_a_25m_features.json"
-stats_path = "/mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json"
-
-with open(config_path, "r", encoding="utf-8") as f:
-    config = json.load(f)
-with open(stats_path, "r", encoding="utf-8") as f:
-    stats = json.load(f)
-
-config_keys = [x["key"] for x in config["features"]]
-stats_keys = stats.get("feature_keys")
-
-print("config feature count:", len(config_keys))
-print("stats feature count:", len(stats["mean"]))
-print("config keys:", config_keys)
-print("stats keys:", stats_keys)
-print("exact match:", config_keys == stats_keys)
-PY
+python -m src.geospatial.validate_model_a_feature_config \
+  --feature-config configs/model_a_25m_features.json \
+  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json
 ```
 
-If `exact match` is `False`, fix `configs/model_a_25m_features.json` before extraction.
+Expected successful validation:
+
+```text
+Model A feature config validation passed
+Feature count: 17
+```
+
+If validation fails, fix `configs/model_a_25m_features.json` before extraction.
 
 ## 9. Create 25 m Model A Patches From Model B Candidate Cells
 
@@ -554,6 +543,7 @@ feature keys match Model A training order
 src/geospatial/create_alberta_coarse_grid.py
 src/geospatial/extract_model_b_patch.py
 src/geospatial/validate_model_b_feature_config.py
+src/geospatial/validate_model_a_feature_config.py
 src/inference/run_model_b_geospatial.py
 src/geospatial/create_model_a_25m_patches_from_candidates.py
 configs/model_b_1km_features.template.json
@@ -566,7 +556,6 @@ RUNNING.md
 These are the next pieces required for the full heatmap dashboard pipeline:
 
 ```text
-src/geospatial/validate_model_a_feature_config.py
 src/inference/run_model_a_geospatial.py
 src/geospatial/stitch_model_a_heatmap.py
 dashboard/app.py
@@ -606,4 +595,5 @@ models/*.keras
 ```text
 2026-05-24:
 Updated RUNNING.md with all commands for the frozen paired-patch baseline and the geospatial coarse-to-fine prototype implemented so far.
+Added Model A 25 m feature-config validator command.
 ```

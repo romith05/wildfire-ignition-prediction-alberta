@@ -5,7 +5,7 @@ This guide records how to run the current wildfire ignition project code from th
 It includes two workflows:
 
 1. The frozen research paired-patch baseline.
-2. The new geospatial coarse-to-fine prototype work completed so far.
+2. The new geospatial coarse-to-fine prototype.
 
 All commands below assume you are in the repo root:
 
@@ -64,6 +64,7 @@ python -m py_compile src/geospatial/validate_model_b_feature_config.py
 python -m py_compile src/geospatial/validate_model_a_feature_config.py
 python -m py_compile src/inference/run_model_b_geospatial.py
 python -m py_compile src/geospatial/create_model_a_25m_patches_from_candidates.py
+python -m py_compile src/inference/run_model_a_geospatial.py
 python -m py_compile src/inference/run_paired_patch_pipeline.py
 python -m py_compile src/evaluation/summarize_paired_pipeline_results.py
 ```
@@ -506,6 +507,16 @@ python -m src.geospatial.create_model_a_25m_patches_from_candidates \
   --overwrite
 ```
 
+Validated smoke-test result:
+
+```text
+completed: 1
+failed: 0
+example NPZ: data/cache/model_a_25m_patches/ab_coarse_000025_r16_c16.npz
+feature count: 17
+feature shape: 64 x 64
+```
+
 Inspect one generated 25 m `.npz`:
 
 ```bash
@@ -518,7 +529,12 @@ with open(manifest, newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f))
 
 completed = [r for r in rows if r["status"] == "completed"]
+failed = [r for r in rows if r["status"] == "failed"]
+
 print("completed:", len(completed))
+print("failed:", len(failed))
+if failed:
+    print("first failure:", failed[0]["message"])
 if completed:
     p = completed[0]["npz_path"]
     arr = np.load(p)
@@ -537,7 +553,99 @@ all feature arrays are (64, 64)
 feature keys match Model A training order
 ```
 
-## 10. Files Implemented So Far
+## 10. Run Model A Geospatial Inference
+
+File:
+
+```text
+src/inference/run_model_a_geospatial.py
+```
+
+This script reads the Model A 25 m patch manifest, runs the frozen Model A spatial refiner, and writes:
+
+```text
+1. CSV summary per fine patch
+2. georeferenced probability GeoTIFFs
+3. georeferenced binary GeoTIFFs
+```
+
+Run a smoke test on the generated 25 m patch manifest:
+
+```bash
+python -m src.inference.run_model_a_geospatial \
+  --model models/model_A_25m_spatial_unet.keras \
+  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
+  --manifest results/geospatial/model_a_25m_patch_manifest_one_patch.csv \
+  --threshold 0.50 \
+  --min-positive-pixels 1 \
+  --batch-size 4 \
+  --output-csv results/geospatial/model_a_geospatial_predictions_one_patch.csv \
+  --probability-dir results/geospatial/model_a_probability_tifs \
+  --binary-dir results/geospatial/model_a_binary_tifs
+```
+
+Inspect the CSV result:
+
+```bash
+cat results/geospatial/model_a_geospatial_predictions_one_patch.csv
+```
+
+Inspect generated GeoTIFF metadata:
+
+```bash
+python - <<'PY'
+import csv
+import rasterio
+
+csv_path = "results/geospatial/model_a_geospatial_predictions_one_patch.csv"
+with open(csv_path, newline="", encoding="utf-8") as f:
+    rows = list(csv.DictReader(f))
+
+completed = [r for r in rows if r["status"] == "completed"]
+print("completed:", len(completed))
+if completed:
+    prob_path = completed[0]["probability_tif_path"]
+    binary_path = completed[0]["binary_tif_path"]
+    print("probability tif:", prob_path)
+    print("binary tif:", binary_path)
+    with rasterio.open(prob_path) as src:
+        print("prob shape:", src.height, src.width)
+        print("prob crs:", src.crs)
+        print("prob bounds:", src.bounds)
+        print("prob min/max:", float(src.read(1).min()), float(src.read(1).max()))
+    with rasterio.open(binary_path) as src:
+        print("binary shape:", src.height, src.width)
+        print("binary crs:", src.crs)
+        print("binary bounds:", src.bounds)
+        print("binary unique:", sorted(set(src.read(1).ravel().tolist())))
+PY
+```
+
+CSV-only smoke test without writing rasters:
+
+```bash
+python -m src.inference.run_model_a_geospatial \
+  --model models/model_A_25m_spatial_unet.keras \
+  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
+  --manifest results/geospatial/model_a_25m_patch_manifest_one_patch.csv \
+  --threshold 0.50 \
+  --min-positive-pixels 1 \
+  --output-csv results/geospatial/model_a_geospatial_predictions_one_patch.csv \
+  --no-rasters
+```
+
+Expected:
+
+```text
+Rows: 1 or more
+Completed: 1 or more
+Failed: 0
+probability GeoTIFF shape: 64 x 64
+binary GeoTIFF shape: 64 x 64
+CRS and bounds match the Model A patch manifest
+```
+
+## 11. Files Implemented So Far
 
 ```text
 src/geospatial/create_alberta_coarse_grid.py
@@ -546,17 +654,17 @@ src/geospatial/validate_model_b_feature_config.py
 src/geospatial/validate_model_a_feature_config.py
 src/inference/run_model_b_geospatial.py
 src/geospatial/create_model_a_25m_patches_from_candidates.py
+src/inference/run_model_a_geospatial.py
 configs/model_b_1km_features.template.json
 configs/model_a_25m_features.template.json
 RUNNING.md
 ```
 
-## 11. Files Not Implemented Yet
+## 12. Files Not Implemented Yet
 
 These are the next pieces required for the full heatmap dashboard pipeline:
 
 ```text
-src/inference/run_model_a_geospatial.py
 src/geospatial/stitch_model_a_heatmap.py
 dashboard/app.py
 ```
@@ -564,18 +672,14 @@ dashboard/app.py
 Expected future flow:
 
 ```text
-Model A 25 m patch manifest
-↓
-run Model A on generated 25 m NPZ patches
-↓
-write georeferenced probability rasters
+Model A geospatial prediction CSV + probability GeoTIFFs
 ↓
 stitch rasters into Alberta heatmap GeoTIFF
 ↓
 serve heatmap in dashboard
 ```
 
-## 12. Local Files To Avoid Committing
+## 13. Local Files To Avoid Committing
 
 Do not commit generated data, model files, local private configs, or caches unless intentionally using Git LFS or an external artifact store.
 
@@ -587,13 +691,17 @@ configs/model_a_25m_features.json
 data/patches/1km/*.npz
 data/cache/model_a_25m_patches/*.npz
 results/geospatial/*.csv
+results/geospatial/model_a_probability_tifs/*.tif
+results/geospatial/model_a_binary_tifs/*.tif
 models/*.keras
 ```
 
-## 13. Document History
+## 14. Document History
 
 ```text
 2026-05-24:
 Updated RUNNING.md with all commands for the frozen paired-patch baseline and the geospatial coarse-to-fine prototype implemented so far.
 Added Model A 25 m feature-config validator command.
+Recorded successful 25 m candidate-to-Model-A patch smoke test.
+Added Model A geospatial inference command and GeoTIFF inspection commands.
 ```

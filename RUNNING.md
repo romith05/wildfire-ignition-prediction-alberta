@@ -1,22 +1,19 @@
-# Running the Current Wildfire Ignition Pipeline
+# Running the Wildfire Ignition Pipeline
 
-This guide records the current frozen paired-patch baseline for the wildfire ignition risk project.
+This guide records how to run the current wildfire ignition project code from the repository root.
 
-## Current Selected Pipeline
+It includes two workflows:
 
-```text
-1 km patch
-↓
-Model B gatekeeper
-↓
-if passed, find matching 25 m patch by filename
-↓
-Model A spatial refiner
-↓
-final 25 m prediction summary
+1. The frozen research paired-patch baseline.
+2. The new geospatial coarse-to-fine prototype work completed so far.
+
+All commands below assume you are in the repo root:
+
+```bash
+cd /mnt/work/wildfire/25m/wildfire-ignition-prediction-alberta
 ```
 
-## Frozen Model Settings
+## Current Frozen Model Settings
 
 ```text
 Model B default:
@@ -35,21 +32,60 @@ Model A operational minimum positive pixels:
 1
 ```
 
-## Why These Settings Are Frozen
+## Important Local Paths
 
-The selected Model B checkpoint was retrained with explicit phase-wise hard-negative mixing.
-
-Current Model B default:
+These paths are local machine paths and should not be committed if copied into private config files.
 
 ```text
-models/model_B_1km_gatekeeper_hardneg_phase2.keras @ threshold 0.30
+Alberta boundary shapefile:
+/home/bondada.romith/wildfire/NFBD/Alberta_boundary.shp
+
+1 km Model B channel stats:
+/mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json
+
+25 m Model A channel stats:
+/mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json
+
+Expected 1 km static raster folder:
+/mnt/work/wildfire/1km/static/
+
+Expected 25 m static raster folder:
+/mnt/work/wildfire/25m/static/
 ```
 
-This was selected because it reduced false positives and 25 m workload substantially on the negative-heavy paired test while keeping recall near the previous operating range.
+## 1. Quick Syntax Check
 
-The Model A minimum positive pixel rule remains `1` because the current 25 m labels are one-pixel ignition targets. Requiring more than one predicted positive pixel incorrectly suppresses real one-pixel ignition detections.
+Run this after pulling or after code changes:
 
-## Run the Frozen Held-Out Paired Test
+```bash
+python -m py_compile src/geospatial/create_alberta_coarse_grid.py
+python -m py_compile src/geospatial/extract_model_b_patch.py
+python -m py_compile src/geospatial/validate_model_b_feature_config.py
+python -m py_compile src/inference/run_model_b_geospatial.py
+python -m py_compile src/geospatial/create_model_a_25m_patches_from_candidates.py
+python -m py_compile src/inference/run_paired_patch_pipeline.py
+python -m py_compile src/evaluation/summarize_paired_pipeline_results.py
+```
+
+## 2. Frozen Paired-Patch Research Baseline
+
+This is the controlled test pipeline that matches 1 km and 25 m patches by filename.
+
+It is useful for research evaluation, but it is not the final geospatial prototype.
+
+```text
+1 km patch file
+↓
+Model B gatekeeper
+↓
+if passed, find matching 25 m patch by filename
+↓
+Model A spatial refiner
+↓
+final patch-level summary
+```
+
+Run the frozen held-out paired test:
 
 ```bash
 python -m src.inference.run_paired_patch_pipeline \
@@ -65,22 +101,14 @@ python -m src.inference.run_paired_patch_pipeline \
   --output-csv results/paired_patch_pipeline_test_frozen_hardneg_phase2_t030.csv
 ```
 
-Summarize:
+Summarize the paired-patch result:
 
 ```bash
 python -m src.evaluation.summarize_paired_pipeline_results \
   --csv results/paired_patch_pipeline_test_frozen_hardneg_phase2_t030.csv
 ```
 
-## Frozen Held-Out Paired Test Result
-
-CSV:
-
-```text
-results/paired_patch_pipeline_test_frozen_hardneg_phase2_t030.csv
-```
-
-Summary:
+Frozen held-out paired test result recorded so far:
 
 ```text
 rows: 7205
@@ -119,59 +147,463 @@ Model A patch outcome on Model-B-passed patches:
 | patch FP rate | 0.9701 |
 | patch accuracy | 0.8072 |
 
-Model A removal of Model B false-positive patches:
+Do not tune thresholds or retrain based on this held-out test result.
+
+## 3. Geospatial Prototype Overview
+
+The geospatial prototype replaces filename pairing with real map coordinates.
+
+Correct coarse-to-fine flow:
 
 ```text
-Model B false-positive patch candidates: 836
-Removed by Model A: 25
-Kept as final positives: 811
-Patch removal rate: 0.0299
+Alberta boundary
+↓
+32 km x 32 km coarse grid cells
+↓
+extract 32 x 32 Model B patches at 1 km resolution
+↓
+run Model B
+↓
+write selected 1 km candidate cells inside each coarse patch
+↓
+create 64 x 64 Model A patches at 25 m resolution around candidate cells
+↓
+run Model A on those 25 m patches
+↓
+stitch Model A predictions into a heatmap
 ```
 
-## Interpretation
-
-The frozen held-out paired test confirms that the hard-negative Model B generalizes reasonably well in recall:
+Terminology:
 
 ```text
-negative-heavy recall: 0.9400
-held-out test recall:  0.9421
+Model B coarse patch:
+32 x 32 pixels at 1 km = 32 km x 32 km footprint
+
+Model B candidate cell:
+one selected 1 km x 1 km pixel inside the coarse patch
+
+Model A fine patch:
+64 x 64 pixels at 25 m = 1.6 km x 1.6 km footprint
 ```
 
-However, broad false-positive behavior remains a known limitation:
+## 4. Create the Alberta Coarse Grid
+
+File:
 
 ```text
-negative-heavy FP rate: 0.0426
-held-out test FP rate:  0.2337
+src/geospatial/create_alberta_coarse_grid.py
 ```
 
-Model A should still be treated as a pixel-level spatial refiner, not a patch-level false-positive filter. In the held-out test, Model A removed only `25 / 836 = 0.0299` of Model B false-positive patches.
+Create the Model-B-sized grid over Alberta:
 
-## Important Evaluation Rule
-
-Do not tune thresholds or retrain models based on the held-out test result.
-
-This test set was used as a frozen sanity check of the already-selected pipeline. Using it to tune thresholds would turn it into another validation set and weaken the credibility of the final reported result.
-
-## Known Limitation
-
-The current paired-patch pipeline uses filename matching:
-
-```text
-1 km patch filename == 25 m patch filename
+```bash
+python -m src.geospatial.create_alberta_coarse_grid \
+  --boundary /home/bondada.romith/wildfire/NFBD/Alberta_boundary.shp \
+  --output-geojson data/grids/alberta_coarse_grid.geojson \
+  --output-parquet data/grids/alberta_coarse_grid.parquet \
+  --patch-size 32 \
+  --resolution-m 1000
 ```
 
-This is valid for controlled testing only. It is not the final geospatial prototype.
-
-The final prototype must map a flagged 1 km geospatial footprint to the corresponding generated or retrieved 25 m patches, run Model A on those patches, and stitch predictions back into a map.
-
-## Next Development Step
-
-Start the real coarse-to-fine geospatial prototype:
+Expected outputs:
 
 ```text
-1. Run Model B over 1 km geospatial patches.
-2. Recover each passed patch footprint.
-3. Generate or retrieve matching 25 m patches inside that footprint.
-4. Run Model A on those 25 m patches.
-5. Stitch 25 m predictions back into a geospatial output.
+data/grids/alberta_coarse_grid.geojson
+data/grids/alberta_coarse_grid.parquet
+```
+
+Optional grid inspection:
+
+```bash
+python - <<'PY'
+import geopandas as gpd
+
+grid = gpd.read_file("data/grids/alberta_coarse_grid.geojson")
+print(grid.head())
+print("cells:", len(grid))
+print("crs:", grid.crs)
+print("bounds:", grid.total_bounds)
+PY
+```
+
+## 5. Prepare the 1 km Model B Feature Config
+
+Template file committed to the repo:
+
+```text
+configs/model_b_1km_features.template.json
+```
+
+Create your local editable config:
+
+```bash
+cp configs/model_b_1km_features.template.json configs/model_b_1km_features.json
+```
+
+Edit the local file:
+
+```text
+configs/model_b_1km_features.json
+```
+
+The 1 km config must match this exact training key order:
+
+```text
+DEM_1km
+cos_month
+distance_to_road_1km
+landcover_1km
+municipalities_multiband_band1
+municipalities_multiband_band2
+municipalities_multiband_band3
+municipalities_multiband_band4
+municipalities_multiband_band5
+municipalities_multiband_band6
+municipalities_multiband_band7
+municipalities_multiband_band8
+relative_humidity
+sin_month
+temperature
+water_1km
+wind_speed
+```
+
+Compute month constants for the target inference month:
+
+```bash
+python - <<'PY'
+import math
+
+month = 5  # change this to target inference month
+print("sin_month:", math.sin(2 * math.pi * month / 12))
+print("cos_month:", math.cos(2 * math.pi * month / 12))
+PY
+```
+
+Update `sin_month` and `cos_month` in `configs/model_b_1km_features.json` before extraction.
+
+Validate the local 1 km feature config:
+
+```bash
+python -m src.geospatial.validate_model_b_feature_config \
+  --feature-config configs/model_b_1km_features.json \
+  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json
+```
+
+Expected successful validation:
+
+```text
+Model B feature config validation passed
+Feature count: 17
+```
+
+## 6. Extract 1 km Model B Geospatial Patches
+
+File:
+
+```text
+src/geospatial/extract_model_b_patch.py
+```
+
+Extract one coarse patch first:
+
+```bash
+python -m src.geospatial.extract_model_b_patch \
+  --grid data/grids/alberta_coarse_grid.geojson \
+  --feature-config configs/model_b_1km_features.json \
+  --output-dir data/patches/1km \
+  --patch-id ab_coarse_000001 \
+  --manifest results/geospatial/model_b_patch_extraction_manifest.csv \
+  --overwrite
+```
+
+Inspect the extracted `.npz`:
+
+```bash
+python - <<'PY'
+import numpy as np
+
+p = "data/patches/1km/ab_coarse_000001.npz"
+arr = np.load(p)
+print(arr.files)
+for k in arr.files:
+    print(k, arr[k].shape, arr[k].dtype, float(arr[k].min()), float(arr[k].max()))
+PY
+```
+
+Expected:
+
+```text
+17 feature keys
+all feature arrays are (32, 32)
+no metadata key inside the NPZ
+```
+
+Extract a small smoke-test batch of coarse patches:
+
+```bash
+python -m src.geospatial.extract_model_b_patch \
+  --grid data/grids/alberta_coarse_grid.geojson \
+  --feature-config configs/model_b_1km_features.json \
+  --output-dir data/patches/1km \
+  --all \
+  --max-patches 25 \
+  --overwrite \
+  --manifest results/geospatial/model_b_patch_extraction_manifest_25.csv
+```
+
+Note: `--max-patches 25` means 25 coarse Model B patches for a smoke test. It does not mean 25 m patches.
+
+## 7. Run Model B Geospatial Inference
+
+File:
+
+```text
+src/inference/run_model_b_geospatial.py
+```
+
+This script writes two outputs:
+
+```text
+1. Coarse patch score CSV
+2. Selected 1 km candidate cell CSV
+```
+
+Run on one extracted patch using the manifest:
+
+```bash
+python -m src.inference.run_model_b_geospatial \
+  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
+  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
+  --manifest results/geospatial/model_b_patch_extraction_manifest.csv \
+  --threshold 0.30 \
+  --candidate-threshold 0.30 \
+  --output-csv results/geospatial/model_b_geospatial_scores_one_patch.csv \
+  --candidate-csv results/geospatial/model_b_candidate_1km_cells_one_patch.csv
+```
+
+Inspect outputs:
+
+```bash
+cat results/geospatial/model_b_geospatial_scores_one_patch.csv
+head results/geospatial/model_b_candidate_1km_cells_one_patch.csv
+```
+
+Run on the 25-coarse-patch smoke-test manifest:
+
+```bash
+python -m src.inference.run_model_b_geospatial \
+  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
+  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
+  --manifest results/geospatial/model_b_patch_extraction_manifest_25.csv \
+  --threshold 0.30 \
+  --candidate-threshold 0.30 \
+  --output-csv results/geospatial/model_b_geospatial_scores_25.csv \
+  --candidate-csv results/geospatial/model_b_candidate_1km_cells_25.csv
+```
+
+The candidate CSV is the bridge to Model A. Each row is one selected 1 km cell with map bounds:
+
+```text
+candidate_id
+patch_id
+row
+col
+probability
+cell_xmin
+cell_ymin
+cell_xmax
+cell_ymax
+crs
+```
+
+## 8. Prepare the 25 m Model A Feature Config
+
+Template file committed to the repo:
+
+```text
+configs/model_a_25m_features.template.json
+```
+
+Create your local editable config:
+
+```bash
+cp configs/model_a_25m_features.template.json configs/model_a_25m_features.json
+```
+
+Edit the local file:
+
+```text
+configs/model_a_25m_features.json
+```
+
+The current template expects this known 25 m feature pattern:
+
+```text
+DEM_25m
+cos_month
+distance_to_road_25m
+landcover_25m
+municipalities_multiband_band1
+municipalities_multiband_band2
+municipalities_multiband_band3
+municipalities_multiband_band4
+municipalities_multiband_band5
+municipalities_multiband_band6
+municipalities_multiband_band7
+municipalities_multiband_band8
+relative_humidity
+sin_month
+temperature
+water_25m
+wind_speed
+```
+
+Before generating many 25 m patches, compare this config against the actual 25 m `channel_stats.json` used to train Model A. A dedicated Model A config validator has not been added yet.
+
+Manual key check:
+
+```bash
+python - <<'PY'
+import json
+
+config_path = "configs/model_a_25m_features.json"
+stats_path = "/mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json"
+
+with open(config_path, "r", encoding="utf-8") as f:
+    config = json.load(f)
+with open(stats_path, "r", encoding="utf-8") as f:
+    stats = json.load(f)
+
+config_keys = [x["key"] for x in config["features"]]
+stats_keys = stats.get("feature_keys")
+
+print("config feature count:", len(config_keys))
+print("stats feature count:", len(stats["mean"]))
+print("config keys:", config_keys)
+print("stats keys:", stats_keys)
+print("exact match:", config_keys == stats_keys)
+PY
+```
+
+If `exact match` is `False`, fix `configs/model_a_25m_features.json` before extraction.
+
+## 9. Create 25 m Model A Patches From Model B Candidate Cells
+
+File:
+
+```text
+src/geospatial/create_model_a_25m_patches_from_candidates.py
+```
+
+This reads selected 1 km candidate cells and creates one 64 x 64, 25 m patch centered on each candidate cell.
+
+Each patch covers:
+
+```text
+64 pixels x 25 m = 1600 m
+1.6 km x 1.6 km footprint
+```
+
+Run a small smoke test from the one-patch candidate CSV:
+
+```bash
+python -m src.geospatial.create_model_a_25m_patches_from_candidates \
+  --candidates results/geospatial/model_b_candidate_1km_cells_one_patch.csv \
+  --feature-config configs/model_a_25m_features.json \
+  --output-dir data/cache/model_a_25m_patches \
+  --manifest results/geospatial/model_a_25m_patch_manifest_one_patch.csv \
+  --max-candidates 5 \
+  --overwrite
+```
+
+Inspect one generated 25 m `.npz`:
+
+```bash
+python - <<'PY'
+import csv
+import numpy as np
+
+manifest = "results/geospatial/model_a_25m_patch_manifest_one_patch.csv"
+with open(manifest, newline="", encoding="utf-8") as f:
+    rows = list(csv.DictReader(f))
+
+completed = [r for r in rows if r["status"] == "completed"]
+print("completed:", len(completed))
+if completed:
+    p = completed[0]["npz_path"]
+    arr = np.load(p)
+    print("npz:", p)
+    print(arr.files)
+    for k in arr.files:
+        print(k, arr[k].shape, arr[k].dtype, float(arr[k].min()), float(arr[k].max()))
+PY
+```
+
+Expected:
+
+```text
+feature-only NPZ
+all feature arrays are (64, 64)
+feature keys match Model A training order
+```
+
+## 10. Files Implemented So Far
+
+```text
+src/geospatial/create_alberta_coarse_grid.py
+src/geospatial/extract_model_b_patch.py
+src/geospatial/validate_model_b_feature_config.py
+src/inference/run_model_b_geospatial.py
+src/geospatial/create_model_a_25m_patches_from_candidates.py
+configs/model_b_1km_features.template.json
+configs/model_a_25m_features.template.json
+RUNNING.md
+```
+
+## 11. Files Not Implemented Yet
+
+These are the next pieces required for the full heatmap dashboard pipeline:
+
+```text
+src/geospatial/validate_model_a_feature_config.py
+src/inference/run_model_a_geospatial.py
+src/geospatial/stitch_model_a_heatmap.py
+dashboard/app.py
+```
+
+Expected future flow:
+
+```text
+Model A 25 m patch manifest
+↓
+run Model A on generated 25 m NPZ patches
+↓
+write georeferenced probability rasters
+↓
+stitch rasters into Alberta heatmap GeoTIFF
+↓
+serve heatmap in dashboard
+```
+
+## 12. Local Files To Avoid Committing
+
+Do not commit generated data, model files, local private configs, or caches unless intentionally using Git LFS or an external artifact store.
+
+Examples:
+
+```text
+configs/model_b_1km_features.json
+configs/model_a_25m_features.json
+data/patches/1km/*.npz
+data/cache/model_a_25m_patches/*.npz
+results/geospatial/*.csv
+models/*.keras
+```
+
+## 13. Document History
+
+```text
+2026-05-24:
+Updated RUNNING.md with all commands for the frozen paired-patch baseline and the geospatial coarse-to-fine prototype implemented so far.
 ```

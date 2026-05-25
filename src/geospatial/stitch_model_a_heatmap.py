@@ -1,7 +1,13 @@
 """Stitch Model A probability GeoTIFFs into one heatmap.
 
-Reads the CSV from src.inference.run_model_a_geospatial and merges completed
-probability_tif_path rasters. Overlap is resolved by maximum probability.
+Reads the CSV from ``src.inference.run_model_a_geospatial`` and merges completed
+candidate-cell probability rasters by default.
+
+Default behavior uses ``cell_probability_tif_path`` because final Alberta
+heatmaps should cover only the 1 km Model B candidate cells, not the full
+1.6 km Model A context patches.
+
+Overlap is resolved by maximum probability.
 """
 
 from __future__ import annotations
@@ -19,10 +25,15 @@ from rasterio.transform import from_origin
 
 DEFAULT_OUTPUT_TIF = "results/geospatial/alberta_model_a_heatmap.tif"
 DEFAULT_THRESHOLD = 0.50
+DEFAULT_RASTER_COLUMN = "cell_probability_tif_path"
 TOL = 1e-6
 
 
-def read_probability_paths(csv_path: str | Path, max_files: int | None) -> list[Path]:
+def read_probability_paths(
+    csv_path: str | Path,
+    raster_column: str,
+    max_files: int | None,
+) -> list[Path]:
     """Return completed probability GeoTIFF paths from prediction CSV."""
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -32,7 +43,7 @@ def read_probability_paths(csv_path: str | Path, max_files: int | None) -> list[
     with csv_path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fields = set(reader.fieldnames or [])
-        required = {"status", "probability_tif_path"}
+        required = {"status", raster_column}
         missing = required.difference(fields)
         if missing:
             raise ValueError(f"Prediction CSV missing columns: {sorted(missing)}")
@@ -40,7 +51,7 @@ def read_probability_paths(csv_path: str | Path, max_files: int | None) -> list[
         for row in reader:
             if row.get("status") != "completed":
                 continue
-            value = row.get("probability_tif_path", "")
+            value = row.get(raster_column, "")
             if not value:
                 continue
             path = Path(value)
@@ -51,7 +62,9 @@ def read_probability_paths(csv_path: str | Path, max_files: int | None) -> list[
     if max_files is not None:
         paths = paths[: max(0, max_files)]
     if not paths:
-        raise ValueError(f"No completed probability GeoTIFFs found in {csv_path}")
+        raise ValueError(
+            f"No completed probability GeoTIFFs found in {csv_path} using column '{raster_column}'"
+        )
     return paths
 
 
@@ -90,6 +103,9 @@ def build_output_metadata(paths: list[Path]) -> dict[str, Any]:
     yres = float(first_yres)
     width = int(math.ceil((right - left) / xres))
     height = int(math.ceil((top - bottom) / yres))
+
+    if width <= 0 or height <= 0:
+        raise ValueError("Computed invalid output heatmap shape.")
 
     return {
         "crs": first_crs,
@@ -150,6 +166,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--binary-output-tif", default=None, help="Optional binary heatmap GeoTIFF.")
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Binary threshold.")
     parser.add_argument("--max-files", type=int, default=None, help="Optional smoke-test cap.")
+    parser.add_argument(
+        "--raster-column",
+        default=DEFAULT_RASTER_COLUMN,
+        help=(
+            "Prediction CSV column containing rasters to stitch. "
+            "Default uses cropped candidate-cell rasters: cell_probability_tif_path. "
+            "Use probability_tif_path only for debugging full 1.6 km context patches."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -158,7 +183,7 @@ def main() -> None:
     if not 0.0 <= args.threshold <= 1.0:
         raise ValueError("--threshold must be between 0 and 1")
 
-    paths = read_probability_paths(args.predictions_csv, args.max_files)
+    paths = read_probability_paths(args.predictions_csv, args.raster_column, args.max_files)
     meta = build_output_metadata(paths)
     mosaic = np.zeros((meta["height"], meta["width"]), dtype=np.float32)
 
@@ -173,6 +198,7 @@ def main() -> None:
         write_tif(args.binary_output_tif, binary, meta, dtype="uint8")
 
     print("Model A heatmap stitching complete")
+    print(f"Raster column: {args.raster_column}")
     print(f"Input rasters: {len(paths)}")
     print(f"Output probability heatmap: {args.output_tif}")
     if args.binary_output_tif:

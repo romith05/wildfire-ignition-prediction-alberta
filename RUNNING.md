@@ -50,7 +50,7 @@ Expected 1 km static raster folder:
 /mnt/work/wildfire/1km/static/
 
 Expected 25 m static raster folder:
-/mnt/work/wildfire/25m/static/
+/mnt/work/wildfire/25m/static_25/
 ```
 
 ## 1. Quick Syntax Check
@@ -444,7 +444,7 @@ The current template expects this known 25 m feature pattern:
 ```text
 DEM_25m
 cos_month
-distance_to_road_25m
+distance_to_road
 landcover_25m
 municipalities_multiband_band1
 municipalities_multiband_band2
@@ -460,6 +460,8 @@ temperature
 water_25m
 wind_speed
 ```
+
+Important: the Model A training stats currently expect the key `distance_to_road`, not `distance_to_road_25m`. The raster path can still point to your 25 m road-distance file.
 
 Validate the local 25 m feature config before creating Model A patches:
 
@@ -704,4 +706,5 @@ Updated RUNNING.md with all commands for the frozen paired-patch baseline and th
 Added Model A 25 m feature-config validator command.
 Recorded successful 25 m candidate-to-Model-A patch smoke test.
 Added Model A geospatial inference command and GeoTIFF inspection commands.
+Documented that Model A expects distance_to_road, not distance_to_road_25m.
 ```

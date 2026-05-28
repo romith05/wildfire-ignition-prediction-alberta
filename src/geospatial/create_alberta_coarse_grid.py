@@ -13,6 +13,7 @@ Example:
       --boundary /home/bondada.romith/wildfire/NFBD/Alberta_boundary.shp \
       --output-geojson data/grids/alberta_coarse_grid.geojson \
       --output-parquet data/grids/alberta_coarse_grid.parquet \
+      --target-crs EPSG:3979 \
       --patch-size 32 \
       --resolution-m 1000
 """
@@ -27,7 +28,7 @@ import geopandas as gpd
 from shapely.geometry import box
 
 
-DEFAULT_TARGET_CRS = "EPSG:3400"
+DEFAULT_TARGET_CRS = "EPSG:3979"
 DEFAULT_PATCH_SIZE = 32
 DEFAULT_RESOLUTION_M = 1000
 
@@ -139,7 +140,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target-crs",
         default=DEFAULT_TARGET_CRS,
-        help="Projected CRS for metric grid creation. Default: EPSG:3400.",
+        help="Projected CRS for metric grid creation. Default: EPSG:3979.",
     )
     parser.add_argument(
         "--patch-size",

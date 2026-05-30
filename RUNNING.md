@@ -1,19 +1,12 @@
 # Running the Wildfire Ignition Pipeline
 
-This guide records how to run the current wildfire ignition project code from the repository root.
-
-It includes two workflows:
-
-1. The frozen research paired-patch baseline.
-2. The new geospatial coarse-to-fine prototype.
-
-All commands below assume you are in the repo root:
+This guide records the current commands for the wildfire ignition project from the repository root.
 
 ```bash
 cd /mnt/work/wildfire/25m/wildfire-ignition-prediction-alberta
 ```
 
-## Current Frozen Model Settings
+## Current Model Settings
 
 ```text
 Model B default:
@@ -34,7 +27,7 @@ Model A operational minimum positive pixels:
 
 ## Important Local Paths
 
-These paths are local machine paths and should not be committed if copied into private config files.
+These are local machine paths. Do not commit them inside private config files.
 
 ```text
 Alberta boundary shapefile:
@@ -53,7 +46,19 @@ Expected 25 m static raster folder:
 /mnt/work/wildfire/25m/static_25/
 ```
 
-## 1. Quick Syntax Check
+## CRS Rule
+
+The aligned static rasters are in:
+
+```text
+EPSG:3979
+```
+
+The geospatial prototype should therefore create the Alberta coarse grid and all downstream outputs in `EPSG:3979`.
+
+Old `EPSG:3400` outputs were useful as code smoke tests only. Treat those outputs as stale geospatial artifacts.
+
+## Quick Syntax Check
 
 Run this after pulling or after code changes:
 
@@ -65,29 +70,16 @@ python -m py_compile src/geospatial/validate_model_a_feature_config.py
 python -m py_compile src/inference/run_model_b_geospatial.py
 python -m py_compile src/geospatial/create_model_a_25m_patches_from_candidates.py
 python -m py_compile src/inference/run_model_a_geospatial.py
+python -m py_compile src/geospatial/stitch_model_a_heatmap.py
+python -m py_compile src/geospatial/export_model_a_cells_geojson.py
+python -m py_compile dashboard/app.py
 python -m py_compile src/inference/run_paired_patch_pipeline.py
 python -m py_compile src/evaluation/summarize_paired_pipeline_results.py
 ```
 
-## 2. Frozen Paired-Patch Research Baseline
+## Frozen Paired-Patch Research Baseline
 
-This is the controlled test pipeline that matches 1 km and 25 m patches by filename.
-
-It is useful for research evaluation, but it is not the final geospatial prototype.
-
-```text
-1 km patch file
-↓
-Model B gatekeeper
-↓
-if passed, find matching 25 m patch by filename
-↓
-Model A spatial refiner
-↓
-final patch-level summary
-```
-
-Run the frozen held-out paired test:
+This workflow matches 1 km and 25 m patches by filename. It is useful for controlled research evaluation, but it is not the final geospatial prototype.
 
 ```bash
 python -m src.inference.run_paired_patch_pipeline \
@@ -103,14 +95,14 @@ python -m src.inference.run_paired_patch_pipeline \
   --output-csv results/paired_patch_pipeline_test_frozen_hardneg_phase2_t030.csv
 ```
 
-Summarize the paired-patch result:
+Summarize:
 
 ```bash
 python -m src.evaluation.summarize_paired_pipeline_results \
   --csv results/paired_patch_pipeline_test_frozen_hardneg_phase2_t030.csv
 ```
 
-Frozen held-out paired test result recorded so far:
+Recorded frozen held-out paired-test result:
 
 ```text
 rows: 7205
@@ -123,56 +115,34 @@ Rows with 25 m labels:  4254 / 7205
 Missing paired 25 m patches: 0
 ```
 
-Model B gatekeeper result:
+Do not tune thresholds or retrain from this held-out test result.
 
-| Metric | Value |
-|---|---:|
-| TP | 3418 |
-| FP | 836 |
-| TN | 2741 |
-| FN | 210 |
-| patch precision | 0.8035 |
-| patch recall | 0.9421 |
-| patch FP rate | 0.2337 |
-| patch accuracy | 0.8548 |
-
-Model A patch outcome on Model-B-passed patches:
-
-| Metric | Value |
-|---|---:|
-| TP | 3409 |
-| FP | 811 |
-| TN | 25 |
-| FN | 9 |
-| patch precision | 0.8078 |
-| patch recall | 0.9974 |
-| patch FP rate | 0.9701 |
-| patch accuracy | 0.8072 |
-
-Do not tune thresholds or retrain based on this held-out test result.
-
-## 3. Geospatial Prototype Overview
+## Geospatial Prototype Overview
 
 The geospatial prototype replaces filename pairing with real map coordinates.
-
-Correct coarse-to-fine flow:
 
 ```text
 Alberta boundary
 ↓
-32 km x 32 km coarse grid cells
+32 km x 32 km coarse grid cells in EPSG:3979
 ↓
 extract 32 x 32 Model B patches at 1 km resolution
 ↓
 run Model B
 ↓
-write selected 1 km candidate cells inside each coarse patch
+write selected 1 km candidate cells
 ↓
-create 64 x 64 Model A patches at 25 m resolution around candidate cells
+create 64 x 64 Model A context patches at 25 m resolution
 ↓
-run Model A on those 25 m patches
+run Model A
 ↓
-stitch Model A predictions into a heatmap
+crop Model A output to the selected 1 km candidate cell, usually 40 x 40 pixels
+↓
+stitch cropped candidate-cell rasters into a heatmap
+↓
+export lightweight candidate-cell GeoJSON
+↓
+view GeoJSON in Streamlit dashboard
 ```
 
 Terminology:
@@ -182,73 +152,57 @@ Model B coarse patch:
 32 x 32 pixels at 1 km = 32 km x 32 km footprint
 
 Model B candidate cell:
-one selected 1 km x 1 km pixel inside the coarse patch
+one selected 1 km x 1 km pixel inside a coarse patch
 
-Model A fine patch:
+Model A context patch:
 64 x 64 pixels at 25 m = 1.6 km x 1.6 km footprint
+
+Model A candidate-cell crop:
+40 x 40 pixels at 25 m = 1 km x 1 km footprint
 ```
 
-## 4. Create the Alberta Coarse Grid
+The final overview dashboard should use `cell_probability_tif_path` and candidate-cell GeoJSON, not full 1.6 km context-patch rasters.
 
-File:
-
-```text
-src/geospatial/create_alberta_coarse_grid.py
-```
-
-Create the Model-B-sized grid over Alberta:
+## 1. Create Alberta Coarse Grid in EPSG:3979
 
 ```bash
 python -m src.geospatial.create_alberta_coarse_grid \
   --boundary /home/bondada.romith/wildfire/NFBD/Alberta_boundary.shp \
-  --output-geojson data/grids/alberta_coarse_grid.geojson \
-  --output-parquet data/grids/alberta_coarse_grid.parquet \
+  --output-geojson data/grids/alberta_coarse_grid_epsg3979.geojson \
+  --output-parquet data/grids/alberta_coarse_grid_epsg3979.parquet \
   --patch-size 32 \
   --resolution-m 1000
 ```
 
-Expected outputs:
-
-```text
-data/grids/alberta_coarse_grid.geojson
-data/grids/alberta_coarse_grid.parquet
-```
-
-Optional grid inspection:
+Verify:
 
 ```bash
 python - <<'PY'
 import geopandas as gpd
 
-grid = gpd.read_file("data/grids/alberta_coarse_grid.geojson")
-print(grid.head())
+grid = gpd.read_file("data/grids/alberta_coarse_grid_epsg3979.geojson")
+print("grid crs:", grid.crs)
 print("cells:", len(grid))
-print("crs:", grid.crs)
 print("bounds:", grid.total_bounds)
+print(grid.head().to_string())
 PY
 ```
 
-## 5. Prepare the 1 km Model B Feature Config
-
-Template file committed to the repo:
+Expected:
 
 ```text
-configs/model_b_1km_features.template.json
+grid crs: EPSG:3979
 ```
 
-Create your local editable config:
+## 2. Prepare and Validate Model B 1 km Feature Config
+
+Create local config:
 
 ```bash
 cp configs/model_b_1km_features.template.json configs/model_b_1km_features.json
 ```
 
-Edit the local file:
-
-```text
-configs/model_b_1km_features.json
-```
-
-The 1 km config must match this exact training key order:
+The feature order must match the 1 km training channel stats:
 
 ```text
 DEM_1km
@@ -270,21 +224,7 @@ water_1km
 wind_speed
 ```
 
-Compute month constants for the target inference month:
-
-```bash
-python - <<'PY'
-import math
-
-month = 5  # change this to target inference month
-print("sin_month:", math.sin(2 * math.pi * month / 12))
-print("cos_month:", math.cos(2 * math.pi * month / 12))
-PY
-```
-
-Update `sin_month` and `cos_month` in `configs/model_b_1km_features.json` before extraction.
-
-Validate the local 1 km feature config:
+Validate:
 
 ```bash
 python -m src.geospatial.validate_model_b_feature_config \
@@ -292,154 +232,96 @@ python -m src.geospatial.validate_model_b_feature_config \
   --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json
 ```
 
-Expected successful validation:
+Expected:
 
 ```text
 Model B feature config validation passed
 Feature count: 17
 ```
 
-## 6. Extract 1 km Model B Geospatial Patches
+## 3. Extract 1 km Model B Geospatial Patches
 
-File:
-
-```text
-src/geospatial/extract_model_b_patch.py
-```
-
-Extract one coarse patch first:
+One patch:
 
 ```bash
 python -m src.geospatial.extract_model_b_patch \
-  --grid data/grids/alberta_coarse_grid.geojson \
+  --grid data/grids/alberta_coarse_grid_epsg3979.geojson \
   --feature-config configs/model_b_1km_features.json \
-  --output-dir data/patches/1km \
+  --output-dir data/patches/1km_epsg3979 \
   --patch-id ab_coarse_000001 \
-  --manifest results/geospatial/model_b_patch_extraction_manifest.csv \
+  --manifest results/geospatial/model_b_patch_extraction_manifest_one_epsg3979.csv \
   --overwrite
 ```
 
-Inspect the extracted `.npz`:
+100-patch smoke test:
+
+```bash
+python -m src.geospatial.extract_model_b_patch \
+  --grid data/grids/alberta_coarse_grid_epsg3979.geojson \
+  --feature-config configs/model_b_1km_features.json \
+  --output-dir data/patches/1km_epsg3979 \
+  --all \
+  --max-patches 100 \
+  --overwrite \
+  --manifest results/geospatial/model_b_patch_extraction_manifest_100_epsg3979.csv
+```
+
+Expected from validated run:
+
+```text
+Completed: 100
+Failed: 0
+```
+
+## 4. Run Model B Geospatial Inference
+
+```bash
+python -m src.inference.run_model_b_geospatial \
+  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
+  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
+  --manifest results/geospatial/model_b_patch_extraction_manifest_100_epsg3979.csv \
+  --threshold 0.30 \
+  --candidate-threshold 0.30 \
+  --output-csv results/geospatial/model_b_geospatial_scores_100_epsg3979.csv \
+  --candidate-csv results/geospatial/model_b_candidate_1km_cells_100_epsg3979.csv
+```
+
+Verify CRS:
 
 ```bash
 python - <<'PY'
-import numpy as np
+import pandas as pd
 
-p = "data/patches/1km/ab_coarse_000001.npz"
-arr = np.load(p)
-print(arr.files)
-for k in arr.files:
-    print(k, arr[k].shape, arr[k].dtype, float(arr[k].min()), float(arr[k].max()))
+p = "results/geospatial/model_b_candidate_1km_cells_100_epsg3979.csv"
+df = pd.read_csv(p)
+print("rows:", len(df))
+print("crs:", df["crs"].dropna().unique().tolist())
+print(df.head().to_string(index=False))
 PY
 ```
 
 Expected:
 
 ```text
-17 feature keys
-all feature arrays are (32, 32)
-no metadata key inside the NPZ
+crs: ['EPSG:3979']
 ```
 
-Extract a small smoke-test batch of coarse patches:
-
-```bash
-python -m src.geospatial.extract_model_b_patch \
-  --grid data/grids/alberta_coarse_grid.geojson \
-  --feature-config configs/model_b_1km_features.json \
-  --output-dir data/patches/1km \
-  --all \
-  --max-patches 25 \
-  --overwrite \
-  --manifest results/geospatial/model_b_patch_extraction_manifest_25.csv
-```
-
-Note: `--max-patches 25` means 25 coarse Model B patches for a smoke test. It does not mean 25 m patches.
-
-## 7. Run Model B Geospatial Inference
-
-File:
+Validated Model B 100-patch EPSG:3979 candidate output:
 
 ```text
-src/inference/run_model_b_geospatial.py
+Candidate CSV: results/geospatial/model_b_candidate_1km_cells_100_epsg3979.csv
+CRS: EPSG:3979
 ```
 
-This script writes two outputs:
+## 5. Prepare and Validate Model A 25 m Feature Config
 
-```text
-1. Coarse patch score CSV
-2. Selected 1 km candidate cell CSV
-```
-
-Run on one extracted patch using the manifest:
-
-```bash
-python -m src.inference.run_model_b_geospatial \
-  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
-  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
-  --manifest results/geospatial/model_b_patch_extraction_manifest.csv \
-  --threshold 0.30 \
-  --candidate-threshold 0.30 \
-  --output-csv results/geospatial/model_b_geospatial_scores_one_patch.csv \
-  --candidate-csv results/geospatial/model_b_candidate_1km_cells_one_patch.csv
-```
-
-Inspect outputs:
-
-```bash
-cat results/geospatial/model_b_geospatial_scores_one_patch.csv
-head results/geospatial/model_b_candidate_1km_cells_one_patch.csv
-```
-
-Run on the 25-coarse-patch smoke-test manifest:
-
-```bash
-python -m src.inference.run_model_b_geospatial \
-  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
-  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
-  --manifest results/geospatial/model_b_patch_extraction_manifest_25.csv \
-  --threshold 0.30 \
-  --candidate-threshold 0.30 \
-  --output-csv results/geospatial/model_b_geospatial_scores_25.csv \
-  --candidate-csv results/geospatial/model_b_candidate_1km_cells_25.csv
-```
-
-The candidate CSV is the bridge to Model A. Each row is one selected 1 km cell with map bounds:
-
-```text
-candidate_id
-patch_id
-row
-col
-probability
-cell_xmin
-cell_ymin
-cell_xmax
-cell_ymax
-crs
-```
-
-## 8. Prepare and Validate the 25 m Model A Feature Config
-
-Template file committed to the repo:
-
-```text
-configs/model_a_25m_features.template.json
-```
-
-Create your local editable config:
+Create local config:
 
 ```bash
 cp configs/model_a_25m_features.template.json configs/model_a_25m_features.json
 ```
 
-Edit the local file:
-
-```text
-configs/model_a_25m_features.json
-```
-
-The current template expects this known 25 m feature pattern:
+Model A expects this 25 m feature pattern:
 
 ```text
 DEM_25m
@@ -461,9 +343,14 @@ water_25m
 wind_speed
 ```
 
-Important: the Model A training stats currently expect the key `distance_to_road`, not `distance_to_road_25m`. The raster path can still point to your 25 m road-distance file.
+Important:
 
-Validate the local 25 m feature config before creating Model A patches:
+```text
+Model A expects the key distance_to_road, not distance_to_road_25m.
+The raster path can still point to the 25 m road-distance raster.
+```
+
+Validate:
 
 ```bash
 python -m src.geospatial.validate_model_a_feature_config \
@@ -471,183 +358,232 @@ python -m src.geospatial.validate_model_a_feature_config \
   --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json
 ```
 
-Expected successful validation:
+Expected:
 
 ```text
 Model A feature config validation passed
 Feature count: 17
 ```
 
-If validation fails, fix `configs/model_a_25m_features.json` before extraction.
+## 6. Create 25 m Model A Context Patches
 
-## 9. Create 25 m Model A Patches From Model B Candidate Cells
-
-File:
-
-```text
-src/geospatial/create_model_a_25m_patches_from_candidates.py
-```
-
-This reads selected 1 km candidate cells and creates one 64 x 64, 25 m patch centered on each candidate cell.
-
-Each patch covers:
-
-```text
-64 pixels x 25 m = 1600 m
-1.6 km x 1.6 km footprint
-```
-
-Run a small smoke test from the one-patch candidate CSV:
+Create one 64 x 64, 25 m context patch per selected Model B 1 km candidate cell:
 
 ```bash
 python -m src.geospatial.create_model_a_25m_patches_from_candidates \
-  --candidates results/geospatial/model_b_candidate_1km_cells_one_patch.csv \
+  --candidates results/geospatial/model_b_candidate_1km_cells_100_epsg3979.csv \
   --feature-config configs/model_a_25m_features.json \
-  --output-dir data/cache/model_a_25m_patches \
-  --manifest results/geospatial/model_a_25m_patch_manifest_one_patch.csv \
-  --max-candidates 5 \
+  --output-dir data/cache/model_a_25m_patches_100_epsg3979 \
+  --manifest results/geospatial/model_a_25m_patch_manifest_100_epsg3979.csv \
   --overwrite
-```
-
-Validated smoke-test result:
-
-```text
-completed: 1
-failed: 0
-example NPZ: data/cache/model_a_25m_patches/ab_coarse_000025_r16_c16.npz
-feature count: 17
-feature shape: 64 x 64
-```
-
-Inspect one generated 25 m `.npz`:
-
-```bash
-python - <<'PY'
-import csv
-import numpy as np
-
-manifest = "results/geospatial/model_a_25m_patch_manifest_one_patch.csv"
-with open(manifest, newline="", encoding="utf-8") as f:
-    rows = list(csv.DictReader(f))
-
-completed = [r for r in rows if r["status"] == "completed"]
-failed = [r for r in rows if r["status"] == "failed"]
-
-print("completed:", len(completed))
-print("failed:", len(failed))
-if failed:
-    print("first failure:", failed[0]["message"])
-if completed:
-    p = completed[0]["npz_path"]
-    arr = np.load(p)
-    print("npz:", p)
-    print(arr.files)
-    for k in arr.files:
-        print(k, arr[k].shape, arr[k].dtype, float(arr[k].min()), float(arr[k].max()))
-PY
 ```
 
 Expected:
 
 ```text
-feature-only NPZ
-all feature arrays are (64, 64)
-feature keys match Model A training order
+Completed > 0
+Failed: 0
 ```
 
-## 10. Run Model A Geospatial Inference
+## 7. Run Model A Geospatial Inference With Cropped Candidate-Cell Outputs
 
-File:
-
-```text
-src/inference/run_model_a_geospatial.py
-```
-
-This script reads the Model A 25 m patch manifest, runs the frozen Model A spatial refiner, and writes:
-
-```text
-1. CSV summary per fine patch
-2. georeferenced probability GeoTIFFs
-3. georeferenced binary GeoTIFFs
-```
-
-Run a smoke test on the generated 25 m patch manifest:
+This writes both full 64 x 64 context-patch rasters and cropped 40 x 40 candidate-cell rasters.
 
 ```bash
 python -m src.inference.run_model_a_geospatial \
   --model models/model_A_25m_spatial_unet.keras \
   --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
-  --manifest results/geospatial/model_a_25m_patch_manifest_one_patch.csv \
+  --manifest results/geospatial/model_a_25m_patch_manifest_100_epsg3979.csv \
   --threshold 0.50 \
   --min-positive-pixels 1 \
-  --batch-size 4 \
-  --output-csv results/geospatial/model_a_geospatial_predictions_one_patch.csv \
-  --probability-dir results/geospatial/model_a_probability_tifs \
-  --binary-dir results/geospatial/model_a_binary_tifs
+  --batch-size 8 \
+  --output-csv results/geospatial/model_a_geospatial_predictions_100_epsg3979.csv \
+  --probability-dir results/geospatial/model_a_probability_tifs_100_epsg3979 \
+  --binary-dir results/geospatial/model_a_binary_tifs_100_epsg3979 \
+  --cell-probability-dir results/geospatial/model_a_cell_probability_tifs_100_epsg3979 \
+  --cell-binary-dir results/geospatial/model_a_cell_binary_tifs_100_epsg3979
 ```
 
-Inspect the CSV result:
-
-```bash
-cat results/geospatial/model_a_geospatial_predictions_one_patch.csv
-```
-
-Inspect generated GeoTIFF metadata:
+Inspect one cropped cell raster:
 
 ```bash
 python - <<'PY'
 import csv
 import rasterio
 
-csv_path = "results/geospatial/model_a_geospatial_predictions_one_patch.csv"
+csv_path = "results/geospatial/model_a_geospatial_predictions_100_epsg3979.csv"
 with open(csv_path, newline="", encoding="utf-8") as f:
     rows = list(csv.DictReader(f))
 
 completed = [r for r in rows if r["status"] == "completed"]
+failed = [r for r in rows if r["status"] == "failed"]
 print("completed:", len(completed))
+print("failed:", len(failed))
+if failed:
+    print("first failure:", failed[0]["message"])
+
 if completed:
-    prob_path = completed[0]["probability_tif_path"]
-    binary_path = completed[0]["binary_tif_path"]
-    print("probability tif:", prob_path)
-    print("binary tif:", binary_path)
-    with rasterio.open(prob_path) as src:
-        print("prob shape:", src.height, src.width)
-        print("prob crs:", src.crs)
-        print("prob bounds:", src.bounds)
-        print("prob min/max:", float(src.read(1).min()), float(src.read(1).max()))
-    with rasterio.open(binary_path) as src:
-        print("binary shape:", src.height, src.width)
-        print("binary crs:", src.crs)
-        print("binary bounds:", src.bounds)
-        print("binary unique:", sorted(set(src.read(1).ravel().tolist())))
+    row = completed[0]
+    print("candidate_id:", row["candidate_id"])
+    print("cell_probability_tif_path:", row["cell_probability_tif_path"])
+    with rasterio.open(row["cell_probability_tif_path"]) as src:
+        arr = src.read(1)
+        print("cell shape:", src.height, src.width)
+        print("cell crs:", src.crs)
+        print("cell bounds:", src.bounds)
+        print("cell min/max:", float(arr.min()), float(arr.max()))
 PY
-```
-
-CSV-only smoke test without writing rasters:
-
-```bash
-python -m src.inference.run_model_a_geospatial \
-  --model models/model_A_25m_spatial_unet.keras \
-  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
-  --manifest results/geospatial/model_a_25m_patch_manifest_one_patch.csv \
-  --threshold 0.50 \
-  --min-positive-pixels 1 \
-  --output-csv results/geospatial/model_a_geospatial_predictions_one_patch.csv \
-  --no-rasters
 ```
 
 Expected:
 
 ```text
-Rows: 1 or more
-Completed: 1 or more
+Completed > 0
 Failed: 0
-probability GeoTIFF shape: 64 x 64
-binary GeoTIFF shape: 64 x 64
-CRS and bounds match the Model A patch manifest
+cell shape: 40 x 40
+cell crs: EPSG:3979
 ```
 
-## 11. Files Implemented So Far
+## 8. Stitch Cropped Candidate-Cell Heatmap
+
+Default behavior stitches `cell_probability_tif_path`, not the full-patch `probability_tif_path`.
+
+```bash
+python -m src.geospatial.stitch_model_a_heatmap \
+  --predictions-csv results/geospatial/model_a_geospatial_predictions_100_epsg3979.csv \
+  --output-tif results/geospatial/alberta_model_a_cell_heatmap_100_epsg3979.tif \
+  --binary-output-tif results/geospatial/alberta_model_a_cell_heatmap_100_epsg3979_binary.tif \
+  --threshold 0.50
+```
+
+Inspect:
+
+```bash
+python - <<'PY'
+import rasterio
+
+for p in [
+    "results/geospatial/alberta_model_a_cell_heatmap_100_epsg3979.tif",
+    "results/geospatial/alberta_model_a_cell_heatmap_100_epsg3979_binary.tif",
+]:
+    print("\n", p)
+    with rasterio.open(p) as src:
+        arr = src.read(1)
+        print("shape:", src.height, src.width)
+        print("crs:", src.crs)
+        print("bounds:", src.bounds)
+        print("min/max:", float(arr.min()), float(arr.max()))
+        if "binary" in p:
+            print("unique:", sorted(set(arr.ravel().tolist())))
+PY
+```
+
+## 9. Export Candidate-Cell GeoJSON for Dashboard
+
+The dashboard uses lightweight candidate-cell polygons instead of a huge mostly-empty 25 m heatmap raster.
+
+```bash
+python -m src.geospatial.export_model_a_cells_geojson \
+  --predictions-csv results/geospatial/model_a_geospatial_predictions_100_epsg3979.csv \
+  --output-geojson results/geospatial/model_a_candidate_cells_100_epsg3979.geojson \
+  --summary-json results/geospatial/model_a_candidate_cells_100_epsg3979_summary.json
+```
+
+Inspect:
+
+```bash
+python - <<'PY'
+import geopandas as gpd
+import json
+
+geojson_path = "results/geospatial/model_a_candidate_cells_100_epsg3979.geojson"
+summary_path = "results/geospatial/model_a_candidate_cells_100_epsg3979_summary.json"
+
+gdf = gpd.read_file(geojson_path)
+print("features:", len(gdf))
+print("crs:", gdf.crs)
+print("bounds:", gdf.total_bounds)
+print("columns:", gdf.columns.tolist())
+print("final_positive counts:")
+print(gdf["final_positive"].value_counts(dropna=False))
+
+with open(summary_path, "r", encoding="utf-8") as f:
+    print(json.dumps(json.load(f), indent=2))
+PY
+```
+
+Expected:
+
+```text
+features > 0
+crs: EPSG:3979
+final_positive counts printed
+```
+
+## 10. Run Streamlit Dashboard Through PuTTY Tunnel
+
+Dashboard file:
+
+```text
+dashboard/app.py
+```
+
+Default dashboard input:
+
+```text
+results/geospatial/model_a_candidate_cells_100_epsg3979.geojson
+results/geospatial/model_a_candidate_cells_100_epsg3979_summary.json
+```
+
+Run Streamlit on the remote machine:
+
+```bash
+streamlit run dashboard/app.py \
+  --server.address 127.0.0.1 \
+  --server.port 8501 \
+  --server.headless true
+```
+
+In PuTTY on the local computer:
+
+```text
+Connection → SSH → Tunnels
+
+Source port:
+8501
+
+Destination:
+127.0.0.1:8501
+
+Type:
+Local
+```
+
+Click **Add**, then reconnect/login with that PuTTY session.
+
+Open this on the local computer browser:
+
+```text
+http://localhost:8501
+```
+
+Expected dashboard behavior:
+
+```text
+Summary cards show candidate-cell counts.
+Candidate-cell polygons appear on the map.
+Sidebar probability filter works.
+Final-positive filter works.
+Candidate-cell table loads and can be downloaded as CSV.
+```
+
+Validated status:
+
+```text
+Dashboard accessible from local computer through PuTTY tunnel.
+```
+
+## Implemented Files
 
 ```text
 src/geospatial/create_alberta_coarse_grid.py
@@ -657,31 +593,33 @@ src/geospatial/validate_model_a_feature_config.py
 src/inference/run_model_b_geospatial.py
 src/geospatial/create_model_a_25m_patches_from_candidates.py
 src/inference/run_model_a_geospatial.py
+src/geospatial/stitch_model_a_heatmap.py
+src/geospatial/export_model_a_cells_geojson.py
+dashboard/app.py
 configs/model_b_1km_features.template.json
 configs/model_a_25m_features.template.json
 RUNNING.md
 ```
 
-## 12. Files Not Implemented Yet
-
-These are the next pieces required for the full heatmap dashboard pipeline:
+## Next Files Not Implemented Yet
 
 ```text
-src/geospatial/stitch_model_a_heatmap.py
-dashboard/app.py
+api/main.py or src/api/main.py
+Dockerfile
+docker-compose.yml
 ```
 
 Expected future flow:
 
 ```text
-Model A geospatial prediction CSV + probability GeoTIFFs
+Dashboard prototype
 ↓
-stitch rasters into Alberta heatmap GeoTIFF
+FastAPI wrapper for inference/status endpoints
 ↓
-serve heatmap in dashboard
+Docker deployment
 ```
 
-## 13. Local Files To Avoid Committing
+## Local Files To Avoid Committing
 
 Do not commit generated data, model files, local private configs, or caches unless intentionally using Git LFS or an external artifact store.
 
@@ -690,21 +628,40 @@ Examples:
 ```text
 configs/model_b_1km_features.json
 configs/model_a_25m_features.json
+data/grids/*.geojson
+data/grids/*.parquet
 data/patches/1km/*.npz
-data/cache/model_a_25m_patches/*.npz
+data/patches/1km_epsg3979/*.npz
+data/cache/model_a_25m_patches*.npz
+data/cache/model_a_25m_patches_*/
 results/geospatial/*.csv
-results/geospatial/model_a_probability_tifs/*.tif
-results/geospatial/model_a_binary_tifs/*.tif
+results/geospatial/*.geojson
+results/geospatial/*.json
+results/geospatial/*.tif
+results/geospatial/model_a_probability_tifs*/
+results/geospatial/model_a_binary_tifs*/
+results/geospatial/model_a_cell_probability_tifs*/
+results/geospatial/model_a_cell_binary_tifs*/
 models/*.keras
 ```
 
-## 14. Document History
+## Document History
 
 ```text
 2026-05-24:
-Updated RUNNING.md with all commands for the frozen paired-patch baseline and the geospatial coarse-to-fine prototype implemented so far.
+Updated RUNNING.md with commands for the frozen paired-patch baseline and geospatial prototype.
 Added Model A 25 m feature-config validator command.
 Recorded successful 25 m candidate-to-Model-A patch smoke test.
-Added Model A geospatial inference command and GeoTIFF inspection commands.
 Documented that Model A expects distance_to_road, not distance_to_road_25m.
+
+2026-05-27:
+Validated 100-coarse-patch geospatial smoke test.
+Added cropped Model A candidate-cell raster workflow.
+Added heatmap stitching from cell_probability_tif_path.
+Added candidate-cell GeoJSON export workflow.
+
+2026-05-30:
+Documented EPSG:3979 as the required geospatial CRS for the aligned rasters and prototype outputs.
+Added Streamlit dashboard through PuTTY tunnel workflow.
+Recorded dashboard validation from local browser through remote PuTTY port forwarding.
 ```

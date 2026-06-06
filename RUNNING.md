@@ -58,6 +58,51 @@ The geospatial prototype should therefore create the Alberta coarse grid and all
 
 Old `EPSG:3400` outputs were useful as code smoke tests only. Treat those outputs as stale geospatial artifacts.
 
+## Open-Meteo API Safety Rule
+
+Open-Meteo is used for live weather ingestion.
+
+Known free API limits from project notes:
+
+```text
+10,000 calls/day
+5,000 calls/hour
+600 calls/minute
+non-commercial use only
+attribution required
+```
+
+The project client now throttles requests by default:
+
+```text
+Default request spacing: 0.25 seconds
+Approximate max request rate from one process: 240 calls/minute
+```
+
+For safer province-wide validation runs, set:
+
+```bash
+export OPEN_METEO_MIN_REQUEST_INTERVAL_SECONDS=1.0
+```
+
+This slows the client to roughly:
+
+```text
+60 calls/minute
+```
+
+Recommended development sequence:
+
+```text
+3 patches
+↓
+100 patches
+↓
+full province once
+```
+
+Avoid repeated full-province runs on the same day unless needed.
+
 ## Quick Syntax Check
 
 Run this after pulling or after code changes:
@@ -72,6 +117,10 @@ python -m py_compile src/geospatial/create_model_a_25m_patches_from_candidates.p
 python -m py_compile src/inference/run_model_a_geospatial.py
 python -m py_compile src/geospatial/stitch_model_a_heatmap.py
 python -m py_compile src/geospatial/export_model_a_cells_geojson.py
+python -m py_compile src/weather/open_meteo_client.py
+python -m py_compile src/weather/weather_patch_generator.py
+python -m py_compile src/inference/run_live_weather_model_b_scan.py
+python -m py_compile src/inference/run_live_weather_model_a_candidates.py
 python -m py_compile dashboard/app.py
 python -m py_compile src/inference/run_paired_patch_pipeline.py
 python -m py_compile src/evaluation/summarize_paired_pipeline_results.py
@@ -188,11 +237,14 @@ print(grid.head().to_string())
 PY
 ```
 
-Expected:
+Expected validated province grid:
 
 ```text
-grid crs: EPSG:3979
+grid rows: 692
+crs: EPSG:3979
 ```
+
+That means the full Alberta scan processes 692 Model B coarse patches. Each coarse patch is 32 km x 32 km and contains 1,024 possible 1 km cells.
 
 ## 2. Prepare and Validate Model B 1 km Feature Config
 
@@ -583,6 +635,566 @@ Validated status:
 Dashboard accessible from local computer through PuTTY tunnel.
 ```
 
+## 11. Live Weather Client Smoke Test
+
+The live-weather client fetches model-ready weather values from Open-Meteo:
+
+```text
+temperature
+relative_humidity
+wind_speed
+```
+
+Syntax check:
+
+```bash
+python -m py_compile src/weather/open_meteo_client.py
+python -m py_compile src/weather/weather_patch_generator.py
+```
+
+Fetch current weather for one point:
+
+```bash
+python -m src.weather.open_meteo_client \
+  --lat 53.5461 \
+  --lon -113.4938
+```
+
+Fetch with explicit request spacing:
+
+```bash
+python -m src.weather.open_meteo_client \
+  --lat 53.5461 \
+  --lon -113.4938 \
+  --min-request-interval-seconds 1.0
+```
+
+Generate a 32 x 32 Model B weather patch:
+
+```bash
+python -m src.weather.weather_patch_generator \
+  --temperature 20 \
+  --relative-humidity 35 \
+  --wind-speed 10 \
+  --height 32 \
+  --width 32 \
+  --seed 42 \
+  --output-npz results/geospatial/weather_patch_32x32_smoke.npz
+```
+
+Generate a 64 x 64 Model A weather patch:
+
+```bash
+python -m src.weather.weather_patch_generator \
+  --temperature 20 \
+  --relative-humidity 35 \
+  --wind-speed 10 \
+  --height 64 \
+  --width 64 \
+  --seed 42 \
+  --output-npz results/geospatial/weather_patch_64x64_smoke.npz
+```
+
+Inspect weather patch outputs:
+
+```bash
+python - <<'PY'
+import numpy as np
+
+for p in [
+    "results/geospatial/weather_patch_32x32_smoke.npz",
+    "results/geospatial/weather_patch_64x64_smoke.npz",
+]:
+    print("\n", p)
+    arr = np.load(p)
+    print(arr.files)
+    for k in arr.files:
+        x = arr[k]
+        print(k, x.shape, x.dtype, float(x.min()), float(x.max()), float(x.mean()))
+PY
+```
+
+Expected:
+
+```text
+32 x 32 file:
+temperature (32, 32)
+relative_humidity (32, 32)
+wind_speed (32, 32)
+
+64 x 64 file:
+temperature (64, 64)
+relative_humidity (64, 64)
+wind_speed (64, 64)
+```
+
+## 12. Live Weather Model B Saved-NPZ Validation
+
+This is the validation-mode live-weather Model B runner. It saves generated NPZ patches so they can be inspected before switching to no-save streaming inference.
+
+Output layout:
+
+```text
+data/runs/<run_id>/model_b_npz/
+results/runs/<run_id>/model_b_manifest.csv
+results/runs/<run_id>/model_b_scores.csv
+results/runs/<run_id>/model_b_candidates.csv
+results/runs/<run_id>/metadata.json
+```
+
+Run a 3-patch current-weather smoke test:
+
+```bash
+python -m src.inference.run_live_weather_model_b_scan \
+  --grid data/grids/alberta_coarse_grid_epsg3979.geojson \
+  --feature-config configs/model_b_1km_features.json \
+  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
+  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
+  --all \
+  --max-patches 3 \
+  --run-id live_weather_model_b_smoke_3_current \
+  --threshold 0.30 \
+  --candidate-threshold 0.30 \
+  --batch-size 3 \
+  --seed 42 \
+  --overwrite
+```
+
+Run a 100-patch current-weather validation test:
+
+```bash
+python -m src.inference.run_live_weather_model_b_scan \
+  --grid data/grids/alberta_coarse_grid_epsg3979.geojson \
+  --feature-config configs/model_b_1km_features.json \
+  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
+  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
+  --all \
+  --max-patches 100 \
+  --run-id live_weather_model_b_100_current \
+  --threshold 0.30 \
+  --candidate-threshold 0.30 \
+  --batch-size 32 \
+  --seed 42 \
+  --overwrite
+```
+
+Validated 100-patch current-weather Model B result:
+
+```text
+Selected patches: 100
+NPZ extraction completed: 100
+NPZ extraction failed: 0
+Model B completed: 100
+Model B failed: 0
+Passed coarse patches: 7
+Candidate 1 km cells: 7
+```
+
+Inspect one saved Model B live-weather NPZ:
+
+```bash
+python - <<'PY'
+import json
+import numpy as np
+import pandas as pd
+
+run_id = "live_weather_model_b_100_current"
+manifest = f"results/runs/{run_id}/model_b_manifest.csv"
+df = pd.read_csv(manifest)
+
+print("manifest rows:", len(df))
+print(df["status"].value_counts(dropna=False))
+
+for _, row in df[df["status"] == "completed"].head(3).iterrows():
+    print("\n==============================")
+    print("patch_id:", row["patch_id"])
+    print("npz:", row["npz_path"])
+
+    arr = np.load(row["npz_path"])
+    for key in ["temperature", "relative_humidity", "wind_speed"]:
+        x = arr[key]
+        print(key, x.shape, x.dtype, float(x.min()), float(x.max()), float(x.mean()))
+
+    metadata = json.loads(row["metadata_json"])
+    print("centroid lat/lon:", metadata["centroid_lat"], metadata["centroid_lon"])
+    print("weather source:", metadata["weather"]["source"])
+    print("weather source_time:", metadata["weather"]["source_time"])
+    print("weather values:", {
+        "temperature": metadata["weather"]["temperature"],
+        "relative_humidity": metadata["weather"]["relative_humidity"],
+        "wind_speed": metadata["weather"]["wind_speed"],
+    })
+PY
+```
+
+Inspect Model B scores and candidates:
+
+```bash
+python - <<'PY'
+import json
+import pandas as pd
+
+run_id = "live_weather_model_b_100_current"
+
+scores = pd.read_csv(f"results/runs/{run_id}/model_b_scores.csv")
+cands = pd.read_csv(f"results/runs/{run_id}/model_b_candidates.csv")
+
+print("scores:", len(scores))
+print("candidates:", len(cands))
+
+print("\nTop Model B coarse patches:")
+print(scores.sort_values("model_b_max_prob", ascending=False)[[
+    "patch_id",
+    "model_b_max_prob",
+    "model_b_mean_prob",
+    "argmax_row",
+    "argmax_col",
+    "candidate_cell_count",
+    "passed_gate",
+]].head(10).to_string(index=False))
+
+print("\nCandidate cells:")
+print(cands.to_string(index=False))
+
+with open(f"results/runs/{run_id}/metadata.json", "r", encoding="utf-8") as f:
+    metadata = json.load(f)
+
+print("\nmetadata counts:")
+print(json.dumps(metadata["counts"], indent=2))
+PY
+```
+
+## 13. Live Weather Model A Saved-NPZ Candidate Validation
+
+This is the validation-mode live-weather Model A runner. It reads Model B candidate cells, saves generated Model A NPZ patches, runs Model A, and writes cropped candidate-cell rasters.
+
+Output layout:
+
+```text
+data/runs/<run_id>/model_a_npz/
+results/runs/<run_id>/model_a_manifest.csv
+results/runs/<run_id>/model_a_predictions.csv
+results/runs/<run_id>/model_a_metadata.json
+results/runs/<run_id>/model_a_probability_tifs/
+results/runs/<run_id>/model_a_binary_tifs/
+results/runs/<run_id>/model_a_cell_probability_tifs/
+results/runs/<run_id>/model_a_cell_binary_tifs/
+```
+
+Run Model A on the 100-patch current-weather Model B candidates:
+
+```bash
+python -m src.inference.run_live_weather_model_a_candidates \
+  --candidates results/runs/live_weather_model_b_100_current/model_b_candidates.csv \
+  --feature-config configs/model_a_25m_features.json \
+  --model models/model_A_25m_spatial_unet.keras \
+  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
+  --run-id live_weather_model_b_100_current \
+  --threshold 0.50 \
+  --min-positive-pixels 1 \
+  --batch-size 8 \
+  --seed 42 \
+  --overwrite
+```
+
+Validated 100-patch current-weather Model A result:
+
+```text
+Candidates: 7
+Model A NPZ creation completed: 7
+Model A NPZ creation failed: 0
+Model A prediction rows: 7
+Model A prediction completed: 7
+Model A prediction failed: 0
+Final positive candidate cells: 6
+Final positive candidate-cell rate: 0.8571
+```
+
+Inspect one saved Model A live-weather NPZ and one cropped candidate-cell raster:
+
+```bash
+python - <<'PY'
+import json
+import numpy as np
+import pandas as pd
+import rasterio
+
+run_id = "live_weather_model_b_100_current"
+
+manifest = f"results/runs/{run_id}/model_a_manifest.csv"
+predictions = f"results/runs/{run_id}/model_a_predictions.csv"
+
+m = pd.read_csv(manifest)
+p = pd.read_csv(predictions)
+
+print("manifest rows:", len(m))
+print(m["status"].value_counts(dropna=False))
+
+print("\nprediction rows:", len(p))
+print(p["status"].value_counts(dropna=False))
+print("final_positive counts:")
+print(p["final_positive"].value_counts(dropna=False))
+
+row = m[m["status"] == "completed"].iloc[0]
+print("\nNPZ:", row["npz_path"])
+arr = np.load(row["npz_path"])
+
+for key in ["temperature", "relative_humidity", "wind_speed"]:
+    x = arr[key]
+    print(key, x.shape, x.dtype, float(x.min()), float(x.max()), float(x.mean()))
+
+metadata = json.loads(row["metadata_json"])
+print("\ncentroid lat/lon:", metadata["centroid_lat"], metadata["centroid_lon"])
+print("weather:", metadata["weather"])
+print("weather_patch_summary:", metadata["weather_patch_summary"])
+
+completed = p[p["status"] == "completed"]
+r = completed.iloc[0]
+
+print("\nfirst prediction:")
+print(r[[
+    "candidate_id",
+    "coarse_patch_id",
+    "cell_max_prob",
+    "cell_mean_prob",
+    "cell_positive_pixels",
+    "final_positive",
+    "cell_probability_tif_path",
+]].to_string())
+
+with rasterio.open(r["cell_probability_tif_path"]) as src:
+    img = src.read(1)
+    print("\ncell raster:")
+    print("shape:", src.height, src.width)
+    print("crs:", src.crs)
+    print("bounds:", src.bounds)
+    print("min/max:", float(img.min()), float(img.max()))
+PY
+```
+
+Expected:
+
+```text
+Model A weather arrays: 64 x 64
+cell raster shape: 40 x 40
+crs: EPSG:3979
+failed: 0
+```
+
+Export the live-weather dashboard GeoJSON:
+
+```bash
+python -m src.geospatial.export_model_a_cells_geojson \
+  --predictions-csv results/runs/live_weather_model_b_100_current/model_a_predictions.csv \
+  --output-geojson results/runs/live_weather_model_b_100_current/model_a_candidate_cells.geojson \
+  --summary-json results/runs/live_weather_model_b_100_current/model_a_candidate_cells_summary.json
+```
+
+Inspect the live-weather GeoJSON:
+
+```bash
+python - <<'PY'
+import geopandas as gpd
+import json
+
+run_id = "live_weather_model_b_100_current"
+geojson = f"results/runs/{run_id}/model_a_candidate_cells.geojson"
+summary = f"results/runs/{run_id}/model_a_candidate_cells_summary.json"
+
+gdf = gpd.read_file(geojson)
+print("features:", len(gdf))
+print("crs:", gdf.crs)
+print("bounds:", gdf.total_bounds)
+print("final_positive counts:")
+print(gdf["final_positive"].value_counts(dropna=False))
+
+with open(summary, "r", encoding="utf-8") as f:
+    print(json.dumps(json.load(f), indent=2))
+PY
+```
+
+Validated 100-patch live-weather GeoJSON result:
+
+```text
+features: 7
+crs: EPSG:3979
+final_positive: 6 yes, 1 no
+cell_max_prob_max: 0.70136905
+cell_max_prob_mean: 0.54555394
+```
+
+## 14. Full Province Live Weather Saved-NPZ Validation
+
+Before running full province, set conservative API throttling:
+
+```bash
+export OPEN_METEO_MIN_REQUEST_INTERVAL_SECONDS=1.0
+```
+
+Create and export one run ID for all commands:
+
+```bash
+RUN_ID=live_weather_province_current_$(date -u +%Y%m%d_%H%M%S)
+export RUN_ID
+echo $RUN_ID
+```
+
+Run full-province Model B with current weather:
+
+```bash
+python -m src.inference.run_live_weather_model_b_scan \
+  --grid data/grids/alberta_coarse_grid_epsg3979.geojson \
+  --feature-config configs/model_b_1km_features.json \
+  --model models/model_B_1km_gatekeeper_hardneg_phase2.keras \
+  --channel-stats /mnt/work/wildfire/1km/patches_1km_balanced/channel_stats.json \
+  --all \
+  --run-id $RUN_ID \
+  --threshold 0.30 \
+  --candidate-threshold 0.30 \
+  --batch-size 128 \
+  --seed 42 \
+  --overwrite
+```
+
+Expected full Model B output:
+
+```text
+Coarse patch rows: 692
+Completed: 692
+Failed: 0
+Passed coarse patches: some number
+Candidate 1 km cells: some number
+```
+
+Summarize full Model B:
+
+```bash
+python - <<'PY'
+import os
+import json
+import pandas as pd
+
+run_id = os.environ["RUN_ID"]
+print("RUN_ID:", run_id)
+
+scores = pd.read_csv(f"results/runs/{run_id}/model_b_scores.csv")
+cands = pd.read_csv(f"results/runs/{run_id}/model_b_candidates.csv")
+
+print("\nModel B scores:", len(scores))
+print(scores["status"].value_counts(dropna=False))
+
+print("\npassed_gate counts:")
+print(scores["passed_gate"].value_counts(dropna=False))
+
+print("\ncandidate cells:", len(cands))
+
+print("\nTop 20 coarse patches:")
+print(scores.sort_values("model_b_max_prob", ascending=False)[[
+    "patch_id",
+    "model_b_max_prob",
+    "model_b_mean_prob",
+    "candidate_cell_count",
+    "passed_gate",
+]].head(20).to_string(index=False))
+
+with open(f"results/runs/{run_id}/metadata.json", "r", encoding="utf-8") as f:
+    metadata = json.load(f)
+
+print("\nmetadata counts:")
+print(json.dumps(metadata["counts"], indent=2))
+PY
+```
+
+Run full Model A on the candidate cells from the same run:
+
+```bash
+python -m src.inference.run_live_weather_model_a_candidates \
+  --candidates results/runs/$RUN_ID/model_b_candidates.csv \
+  --feature-config configs/model_a_25m_features.json \
+  --model models/model_A_25m_spatial_unet.keras \
+  --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
+  --run-id $RUN_ID \
+  --threshold 0.50 \
+  --min-positive-pixels 1 \
+  --batch-size 16 \
+  --seed 42 \
+  --overwrite
+```
+
+Export full live-weather dashboard GeoJSON:
+
+```bash
+python -m src.geospatial.export_model_a_cells_geojson \
+  --predictions-csv results/runs/$RUN_ID/model_a_predictions.csv \
+  --output-geojson results/runs/$RUN_ID/model_a_candidate_cells.geojson \
+  --summary-json results/runs/$RUN_ID/model_a_candidate_cells_summary.json
+```
+
+Final full-run validation:
+
+```bash
+python - <<'PY'
+import os
+import json
+import geopandas as gpd
+import pandas as pd
+
+run_id = os.environ["RUN_ID"]
+print("RUN_ID:", run_id)
+
+b = pd.read_csv(f"results/runs/{run_id}/model_b_candidates.csv")
+a = pd.read_csv(f"results/runs/{run_id}/model_a_predictions.csv")
+g = gpd.read_file(f"results/runs/{run_id}/model_a_candidate_cells.geojson")
+
+print("\nModel B candidates:", len(b))
+print("\nModel A predictions:", len(a))
+print(a["status"].value_counts(dropna=False))
+print("final_positive counts:")
+print(a["final_positive"].value_counts(dropna=False))
+
+print("\nGeoJSON features:", len(g))
+print("GeoJSON CRS:", g.crs)
+print("GeoJSON bounds:", g.total_bounds)
+
+with open(f"results/runs/{run_id}/model_a_candidate_cells_summary.json", "r", encoding="utf-8") as f:
+    print("\nGeoJSON summary:")
+    print(json.dumps(json.load(f), indent=2))
+PY
+```
+
+After the saved-NPZ full province run passes, the next implementation should be the no-save streaming version.
+
+## 15. Run Streamlit Dashboard on a Live-Weather Run
+
+Run Streamlit through the PuTTY tunnel as usual:
+
+```bash
+streamlit run dashboard/app.py \
+  --server.address 127.0.0.1 \
+  --server.port 8501 \
+  --server.headless true
+```
+
+In the dashboard sidebar, use these paths for a live-weather run:
+
+```text
+Candidate-cell GeoJSON:
+results/runs/<run_id>/model_a_candidate_cells.geojson
+
+Summary JSON:
+results/runs/<run_id>/model_a_candidate_cells_summary.json
+```
+
+For the validated 100-patch current-weather run:
+
+```text
+Candidate-cell GeoJSON:
+results/runs/live_weather_model_b_100_current/model_a_candidate_cells.geojson
+
+Summary JSON:
+results/runs/live_weather_model_b_100_current/model_a_candidate_cells_summary.json
+```
+
 ## Implemented Files
 
 ```text
@@ -595,6 +1207,10 @@ src/geospatial/create_model_a_25m_patches_from_candidates.py
 src/inference/run_model_a_geospatial.py
 src/geospatial/stitch_model_a_heatmap.py
 src/geospatial/export_model_a_cells_geojson.py
+src/weather/open_meteo_client.py
+src/weather/weather_patch_generator.py
+src/inference/run_live_weather_model_b_scan.py
+src/inference/run_live_weather_model_a_candidates.py
 dashboard/app.py
 configs/model_b_1km_features.template.json
 configs/model_a_25m_features.template.json
@@ -604,6 +1220,7 @@ RUNNING.md
 ## Next Files Not Implemented Yet
 
 ```text
+No-save streaming live-weather runner
 api/main.py or src/api/main.py
 Dockerfile
 docker-compose.yml
@@ -612,7 +1229,9 @@ docker-compose.yml
 Expected future flow:
 
 ```text
-Dashboard prototype
+Saved-NPZ live-weather province validation
+↓
+No-save streaming live-weather inference
 ↓
 FastAPI wrapper for inference/status endpoints
 ↓
@@ -634,6 +1253,7 @@ data/patches/1km/*.npz
 data/patches/1km_epsg3979/*.npz
 data/cache/model_a_25m_patches*.npz
 data/cache/model_a_25m_patches_*/
+data/runs/*
 results/geospatial/*.csv
 results/geospatial/*.geojson
 results/geospatial/*.json
@@ -642,6 +1262,7 @@ results/geospatial/model_a_probability_tifs*/
 results/geospatial/model_a_binary_tifs*/
 results/geospatial/model_a_cell_probability_tifs*/
 results/geospatial/model_a_cell_binary_tifs*/
+results/runs/*
 models/*.keras
 ```
 
@@ -664,4 +1285,13 @@ Added candidate-cell GeoJSON export workflow.
 Documented EPSG:3979 as the required geospatial CRS for the aligned rasters and prototype outputs.
 Added Streamlit dashboard through PuTTY tunnel workflow.
 Recorded dashboard validation from local browser through remote PuTTY port forwarding.
+
+2026-06-06:
+Added Open-Meteo live-weather client and patch-shaped weather layer generator.
+Added Open-Meteo request throttling using OPEN_METEO_MIN_REQUEST_INTERVAL_SECONDS.
+Added saved-NPZ live-weather Model B scan runner.
+Validated 3-patch and 100-patch current-weather Model B runs.
+Added saved-NPZ live-weather Model A candidate runner.
+Validated 100-patch current-weather two-stage pipeline: 7 Model B candidates, 7 Model A predictions, 6 final-positive cells.
+Added full-province saved-NPZ live-weather validation commands.
 ```

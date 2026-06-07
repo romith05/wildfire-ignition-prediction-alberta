@@ -4,9 +4,15 @@ This is the validation-mode live-weather Model A runner. It intentionally saves
 64 x 64 Model A NPZ patches so we can inspect live-weather candidate patches
 before switching to a no-save streaming setup.
 
-Example:
+By default, the runner can reuse the weather already fetched during the Model B
+stage from ``model_b_manifest.csv``. This avoids extra Open-Meteo calls for
+Model A and keeps the two stages weather-consistent for the same run.
+
+Example using reused Model B weather:
     python -m src.inference.run_live_weather_model_a_candidates \
       --candidates results/runs/live_weather_model_b_100_current/model_b_candidates.csv \
+      --model-b-manifest results/runs/live_weather_model_b_100_current/model_b_manifest.csv \
+      --weather-mode model-b-manifest \
       --feature-config configs/model_a_25m_features.json \
       --model models/model_A_25m_spatial_unet.keras \
       --channel-stats /mnt/work/wildfire/25m/patches_25m_balanced/channel_stats.json \
@@ -58,6 +64,8 @@ DEFAULT_RESOLUTION_M = 25.0
 DEFAULT_THRESHOLD = 0.50
 DEFAULT_MIN_POSITIVE_PIXELS = 1
 WEATHER_KEYS = {"temperature", "relative_humidity", "wind_speed"}
+WEATHER_MODE_API = "api"
+WEATHER_MODE_MODEL_B_MANIFEST = "model-b-manifest"
 
 
 def default_run_id() -> str:
@@ -81,6 +89,8 @@ def apply_default_paths(args: argparse.Namespace) -> argparse.Namespace:
         args.cell_binary_dir = f"results/runs/{args.run_id}/model_a_cell_binary_tifs"
     if args.run_metadata_json is None:
         args.run_metadata_json = f"results/runs/{args.run_id}/model_a_metadata.json"
+    if args.model_b_manifest is None:
+        args.model_b_manifest = f"results/runs/{args.run_id}/model_b_manifest.csv"
     return args
 
 
@@ -128,6 +138,90 @@ def write_manifest(rows: list[dict[str, Any]], path: str | Path) -> None:
     print(f"Saved manifest: {path}")
 
 
+def load_model_b_weather_by_patch(manifest_path: str | Path) -> dict[str, dict[str, Any]]:
+    """Load Model B weather metadata keyed by coarse patch_id.
+
+    The Model B manifest contains one row per coarse patch and stores the fetched
+    Open-Meteo values inside metadata_json. Reusing this for Model A avoids one
+    extra API call per candidate cell.
+    """
+    manifest_path = Path(manifest_path)
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Model B manifest not found: {manifest_path}")
+
+    weather_by_patch: dict[str, dict[str, Any]] = {}
+    with manifest_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        fieldnames = set(reader.fieldnames or [])
+        required = {"patch_id", "status", "metadata_json"}
+        missing = required.difference(fieldnames)
+        if missing:
+            raise ValueError(f"Model B manifest is missing required columns: {sorted(missing)}")
+
+        for row in reader:
+            if row.get("status") != "completed":
+                continue
+            patch_id = str(row.get("patch_id", ""))
+            metadata_json = row.get("metadata_json", "")
+            if not patch_id or not metadata_json:
+                continue
+            try:
+                metadata = json.loads(metadata_json)
+            except json.JSONDecodeError:
+                continue
+            weather = metadata.get("weather", {})
+            if not isinstance(weather, dict):
+                continue
+            required_weather = ["temperature", "relative_humidity", "wind_speed"]
+            if all(key in weather and weather[key] not in (None, "") for key in required_weather):
+                weather_by_patch[patch_id] = weather
+
+    if not weather_by_patch:
+        raise ValueError(f"No reusable Model B weather records found in: {manifest_path}")
+    return weather_by_patch
+
+
+def generate_weather_patch_for_candidate(
+    candidate: dict[str, str],
+    lat: float,
+    lon: float,
+    args: argparse.Namespace,
+    target_time: datetime | None,
+    weather_config: WeatherPatchConfig,
+    model_b_weather_by_patch: dict[str, dict[str, Any]] | None,
+) -> tuple[dict[str, np.ndarray], dict[str, Any], str]:
+    """Create 64 x 64 weather layers for one Model A candidate."""
+    if args.weather_mode == WEATHER_MODE_MODEL_B_MANIFEST:
+        if model_b_weather_by_patch is None:
+            raise ValueError("Model B weather lookup is required for weather-mode=model-b-manifest.")
+        coarse_patch_id = str(candidate.get("patch_id", ""))
+        if coarse_patch_id not in model_b_weather_by_patch:
+            raise ValueError(f"No Model B weather found for coarse patch_id={coarse_patch_id}")
+        weather = dict(model_b_weather_by_patch[coarse_patch_id])
+        weather_patch = generate_weather_patch(
+            temperature=float(weather["temperature"]),
+            relative_humidity=float(weather["relative_humidity"]),
+            wind_speed=float(weather["wind_speed"]),
+            config=weather_config,
+        )
+        return weather_patch, weather, WEATHER_MODE_MODEL_B_MANIFEST
+
+    weather_features = fetch_live_weather_features(
+        lat=float(lat),
+        lon=float(lon),
+        target_time=target_time,
+        timezone=args.weather_timezone,
+        timeout_seconds=args.weather_timeout_seconds,
+    )
+    weather_patch = generate_weather_patch(
+        temperature=weather_features.temperature,
+        relative_humidity=weather_features.relative_humidity,
+        wind_speed=weather_features.wind_speed,
+        config=weather_config,
+    )
+    return weather_patch, asdict(weather_features), WEATHER_MODE_API
+
+
 def save_one_live_weather_model_a_npz(
     candidate: dict[str, str],
     candidate_index: int,
@@ -135,6 +229,7 @@ def save_one_live_weather_model_a_npz(
     output_dir: Path,
     args: argparse.Namespace,
     target_time: datetime | None,
+    model_b_weather_by_patch: dict[str, dict[str, Any]] | None,
 ) -> tuple[Path, dict[str, Any]]:
     candidate_id = candidate["candidate_id"]
     crs = candidate.get("crs", "")
@@ -171,7 +266,7 @@ def save_one_live_weather_model_a_npz(
         "centroid_y": float(center_y),
         "centroid_lat": float(lat),
         "centroid_lon": float(lon),
-        "weather_source": "open-meteo",
+        "weather_mode": args.weather_mode,
         "weather_target_time": args.target_time or "",
         "weather_patch_config": asdict(weather_config),
     }
@@ -179,20 +274,17 @@ def save_one_live_weather_model_a_npz(
     if output_path.exists() and not args.overwrite:
         return output_path, metadata
 
-    weather = fetch_live_weather_features(
+    weather_patch, weather, resolved_weather_source = generate_weather_patch_for_candidate(
+        candidate=candidate,
         lat=float(lat),
         lon=float(lon),
+        args=args,
         target_time=target_time,
-        timezone=args.weather_timezone,
-        timeout_seconds=args.weather_timeout_seconds,
+        weather_config=weather_config,
+        model_b_weather_by_patch=model_b_weather_by_patch,
     )
-    weather_patch = generate_weather_patch(
-        temperature=weather.temperature,
-        relative_humidity=weather.relative_humidity,
-        wind_speed=weather.wind_speed,
-        config=weather_config,
-    )
-    metadata["weather"] = asdict(weather)
+    metadata["weather_source"] = resolved_weather_source
+    metadata["weather"] = weather
     metadata["weather_patch_summary"] = asdict(summarize_weather_patch(weather_patch, weather_config))
 
     arrays: dict[str, np.ndarray] = {}
@@ -219,6 +311,10 @@ def create_live_weather_model_a_npzs(args: argparse.Namespace, target_time: date
     if not candidates:
         raise ValueError("No candidate rows selected")
 
+    model_b_weather_by_patch = None
+    if args.weather_mode == WEATHER_MODE_MODEL_B_MANIFEST:
+        model_b_weather_by_patch = load_model_b_weather_by_patch(args.model_b_manifest)
+
     feature_specs = load_feature_config(args.feature_config)
     output_dir = Path(args.output_dir)
     rows: list[dict[str, Any]] = []
@@ -228,6 +324,9 @@ def create_live_weather_model_a_npzs(args: argparse.Namespace, target_time: date
     print(f"Features: {len(feature_specs)}")
     print(f"Patch shape: {args.patch_size} x {args.patch_size}")
     print(f"Resolution: {args.resolution_m} m/px")
+    print(f"Weather mode: {args.weather_mode}")
+    if args.weather_mode == WEATHER_MODE_MODEL_B_MANIFEST:
+        print(f"Model B manifest weather source: {args.model_b_manifest}")
     print(f"Output dir: {args.output_dir}")
 
     for index, candidate in enumerate(candidates):
@@ -241,6 +340,7 @@ def create_live_weather_model_a_npzs(args: argparse.Namespace, target_time: date
                 output_dir=output_dir,
                 args=args,
                 target_time=target_time,
+                model_b_weather_by_patch=model_b_weather_by_patch,
             )
             rows.append(
                 {
@@ -292,7 +392,9 @@ def write_run_metadata(
         "run_id": args.run_id,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "mode": "validation_saved_npz",
-        "weather_source": "open-meteo",
+        "weather_mode": args.weather_mode,
+        "weather_source": "model_b_manifest" if args.weather_mode == WEATHER_MODE_MODEL_B_MANIFEST else "open-meteo",
+        "model_b_manifest": args.model_b_manifest if args.weather_mode == WEATHER_MODE_MODEL_B_MANIFEST else "",
         "weather_target_time": args.target_time or "",
         "weather_timezone": args.weather_timezone,
         "weather_noise": {
@@ -304,6 +406,7 @@ def write_run_metadata(
         },
         "inputs": {
             "candidates": args.candidates,
+            "model_b_manifest": args.model_b_manifest if args.weather_mode == WEATHER_MODE_MODEL_B_MANIFEST else "",
             "feature_config": args.feature_config,
             "model": args.model,
             "channel_stats": args.channel_stats,
@@ -338,6 +441,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-time", default=None, help="Optional ISO datetime for deterministic hourly weather.")
     parser.add_argument("--weather-timezone", default=DEFAULT_TIMEZONE)
     parser.add_argument("--weather-timeout-seconds", type=int, default=20)
+    parser.add_argument(
+        "--weather-mode",
+        choices=[WEATHER_MODE_API, WEATHER_MODE_MODEL_B_MANIFEST],
+        default=WEATHER_MODE_API,
+        help="Use api for fresh Model A weather calls, or model-b-manifest to reuse Model B weather.",
+    )
+    parser.add_argument(
+        "--model-b-manifest",
+        default=None,
+        help="Model B manifest CSV containing weather metadata. Defaults to results/runs/<run_id>/model_b_manifest.csv.",
+    )
     parser.add_argument("--temperature-noise-scale", type=float, default=DEFAULT_TEMPERATURE_NOISE_SCALE)
     parser.add_argument("--humidity-noise-scale", type=float, default=DEFAULT_HUMIDITY_NOISE_SCALE)
     parser.add_argument("--wind-noise-scale", type=float, default=DEFAULT_WIND_NOISE_SCALE)
@@ -390,6 +504,7 @@ def main() -> None:
     print(f"Patches selected: {len(records)}")
     print(f"Threshold: {args.threshold}")
     print(f"Min positive pixels: {args.min_positive_pixels}")
+    print(f"Weather mode: {args.weather_mode}")
     print(f"Write rasters: {not args.no_rasters}")
 
     prediction_rows = score_records(

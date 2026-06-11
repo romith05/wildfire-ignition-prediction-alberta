@@ -26,8 +26,8 @@ except ImportError:  # pragma: no cover - runtime fallback for minimal environme
     pdk = None
 
 
-DEFAULT_GEOJSON_PATH = "results/geospatial/model_a_candidate_cells_100_epsg3979.geojson"
-DEFAULT_SUMMARY_JSON_PATH = "results/geospatial/model_a_candidate_cells_100_epsg3979_summary.json"
+DEFAULT_GEOJSON_PATH = "results/runs/live_weather_province_current_20260607_211205/model_a_candidate_cells.geojson"
+DEFAULT_SUMMARY_JSON_PATH = "results/runs/live_weather_province_current_20260607_211205/model_a_candidate_cells_summary.json"
 WEB_CRS = "EPSG:4326"
 
 

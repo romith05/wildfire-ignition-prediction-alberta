@@ -64,7 +64,7 @@ def utc_now() -> pd.Timestamp:
 
 def parse_thresholds(value: str) -> list[float]:
     thresholds = sorted({float(item.strip()) for item in value.split(",") if item.strip()})
-    if not thresholds or any(value < 0 for value in thresholds):
+    if not thresholds or any(threshold < 0 for threshold in thresholds):
         raise ValueError("Distance thresholds must contain one or more non-negative values.")
     return thresholds
 
@@ -169,10 +169,10 @@ def read_active_fires(
     if start_date_column not in df.columns:
         raise ValueError(f"Start-date column not found: {start_date_column}")
 
-    df["_fire_id"] = df[fire_id_column].astype(str).str.strip()
-    df["_latitude"] = pd.to_numeric(df[latitude_column], errors="coerce")
-    df["_longitude"] = pd.to_numeric(df[longitude_column], errors="coerce")
-    df["_fire_start_utc"] = pd.to_datetime(
+    df["fire_id_normalized"] = df[fire_id_column].astype(str).str.strip()
+    df["latitude_normalized"] = pd.to_numeric(df[latitude_column], errors="coerce")
+    df["longitude_normalized"] = pd.to_numeric(df[longitude_column], errors="coerce")
+    df["fire_start_utc"] = pd.to_datetime(
         df[start_date_column],
         unit=start_date_unit,
         utc=True,
@@ -180,11 +180,11 @@ def read_active_fires(
     )
 
     df = df[
-        df["_fire_id"].ne("")
-        & df["_latitude"].notna()
-        & df["_longitude"].notna()
+        df["fire_id_normalized"].ne("")
+        & df["latitude_normalized"].notna()
+        & df["longitude_normalized"].notna()
     ].copy()
-    df = df.drop_duplicates(subset=["_fire_id"], keep="last").reset_index(drop=True)
+    df = df.drop_duplicates(subset=["fire_id_normalized"], keep="last").reset_index(drop=True)
     return df
 
 
@@ -230,7 +230,12 @@ def load_model_a_candidates(path: Path) -> tuple[gpd.GeoDataFrame, gpd.GeoDataFr
     if "final_positive" not in all_candidates.columns:
         raise ValueError(f"Model A candidate GeoJSON has no final_positive column: {path}")
 
-    positive_mask = pd.to_numeric(all_candidates["final_positive"], errors="coerce").fillna(0).astype(int).eq(1)
+    positive_mask = (
+        pd.to_numeric(all_candidates["final_positive"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .eq(1)
+    )
     positives = all_candidates[positive_mask].copy()
     return all_candidates, positives
 
@@ -324,9 +329,11 @@ def main() -> None:
 
     if args.initialize_state:
         for row in active.itertuples(index=False):
-            seen_fires[str(row._fire_id)] = {
+            seen_fires[str(row.fire_id_normalized)] = {
                 "first_seen_utc": poll_time.isoformat(),
-                "fire_start_utc": None if pd.isna(row._fire_start_utc) else row._fire_start_utc.isoformat(),
+                "fire_start_utc": (
+                    None if pd.isna(row.fire_start_utc) else row.fire_start_utc.isoformat()
+                ),
                 "baseline": True,
             }
         state["last_poll_time_utc"] = poll_time.isoformat()
@@ -339,7 +346,7 @@ def main() -> None:
         print(f"Prediction registry: {registry_path}")
         return
 
-    new_rows = active[~active["_fire_id"].isin(seen_fires)].copy()
+    new_rows = active[~active["fire_id_normalized"].isin(seen_fires)].copy()
     print(f"Poll time UTC: {poll_time.isoformat()}")
     print(f"Current Alberta fires: {len(active)}")
     print(f"Previously seen fires: {len(seen_fires)}")
@@ -347,17 +354,20 @@ def main() -> None:
     print(f"Eligible prediction runs discovered: {len(runs)}")
 
     validation_rows: list[dict[str, Any]] = []
-    artifact_cache: dict[str, tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame]] = {}
+    artifact_cache: dict[
+        str,
+        tuple[gpd.GeoDataFrame, gpd.GeoDataFrame, gpd.GeoDataFrame],
+    ] = {}
 
     for row in new_rows.itertuples(index=False):
-        fire_id = str(row._fire_id)
-        fire_start = row._fire_start_utc
+        fire_id = str(row.fire_id_normalized)
+        fire_start = row.fire_start_utc
         base_record: dict[str, Any] = {
             "fire_id": fire_id,
             "fire_start_utc": None if pd.isna(fire_start) else fire_start.isoformat(),
             "fire_first_seen_utc": poll_time.isoformat(),
-            "latitude": float(row._latitude),
-            "longitude": float(row._longitude),
+            "latitude": float(row.latitude_normalized),
+            "longitude": float(row.longitude_normalized),
             "agency": args.agency,
             "source_csv": str(active_path),
         }
@@ -373,11 +383,17 @@ def main() -> None:
             else:
                 if selected_run.run_id not in artifact_cache:
                     model_b = load_model_b_candidates(selected_run.model_b_candidates)
-                    model_a_all, model_a_positive = load_model_a_candidates(selected_run.model_a_geojson)
-                    artifact_cache[selected_run.run_id] = (model_b, model_a_all, model_a_positive)
+                    model_a_all, model_a_positive = load_model_a_candidates(
+                        selected_run.model_a_geojson
+                    )
+                    artifact_cache[selected_run.run_id] = (
+                        model_b,
+                        model_a_all,
+                        model_a_positive,
+                    )
 
                 model_b, model_a_all, model_a_positive = artifact_cache[selected_run.run_id]
-                point = Point(float(row._longitude), float(row._latitude))
+                point = Point(float(row.longitude_normalized), float(row.latitude_normalized))
                 model_b_distance = nearest_distance_m(point, model_b)
                 model_a_all_distance = nearest_distance_m(point, model_a_all)
                 model_a_positive_distance = nearest_distance_m(point, model_a_positive)
@@ -387,12 +403,20 @@ def main() -> None:
                         "status": "validated",
                         "prediction_run_id": selected_run.run_id,
                         "prediction_created_utc": selected_run.created_at.isoformat(),
-                        "lead_time_hours": float((fire_start - selected_run.created_at).total_seconds() / 3600.0),
+                        "lead_time_hours": float(
+                            (fire_start - selected_run.created_at).total_seconds() / 3600.0
+                        ),
                     }
                 )
-                base_record.update(distance_fields("model_b_candidate", model_b_distance, thresholds))
-                base_record.update(distance_fields("model_a_candidate", model_a_all_distance, thresholds))
-                base_record.update(distance_fields("model_a_positive", model_a_positive_distance, thresholds))
+                base_record.update(
+                    distance_fields("model_b_candidate", model_b_distance, thresholds)
+                )
+                base_record.update(
+                    distance_fields("model_a_candidate", model_a_all_distance, thresholds)
+                )
+                base_record.update(
+                    distance_fields("model_a_positive", model_a_positive_distance, thresholds)
+                )
                 validation_rows.append(base_record)
 
         seen_fires[fire_id] = {

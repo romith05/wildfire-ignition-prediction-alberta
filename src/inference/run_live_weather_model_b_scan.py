@@ -59,6 +59,7 @@ DEFAULT_THRESHOLD = 0.30
 DEFAULT_PATCH_SIZE = 32
 DEFAULT_RESOLUTION_M = 1000.0
 WEATHER_KEYS = {"temperature", "relative_humidity", "wind_speed"}
+WEATHER_MODES = {"api", "constant"}
 
 
 def default_run_id() -> str:
@@ -100,6 +101,54 @@ def make_weather_config(args: argparse.Namespace) -> WeatherPatchConfig:
     )
 
 
+def validate_weather_args(args: argparse.Namespace) -> None:
+    if args.weather_mode not in WEATHER_MODES:
+        raise ValueError(f"Unsupported weather mode: {args.weather_mode}. Expected one of {sorted(WEATHER_MODES)}.")
+
+    if args.weather_mode == "constant":
+        missing = [
+            name
+            for name in [
+                "constant_temperature",
+                "constant_relative_humidity",
+                "constant_wind_speed",
+            ]
+            if getattr(args, name) is None
+        ]
+        if missing:
+            formatted = ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+            raise ValueError(f"Constant weather mode requires: {formatted}.")
+
+
+def get_weather_payload(
+    *,
+    lat: float,
+    lon: float,
+    args: argparse.Namespace,
+    target_time: datetime | None,
+) -> dict[str, Any]:
+    if args.weather_mode == "constant":
+        return {
+            "temperature": float(args.constant_temperature),
+            "relative_humidity": float(args.constant_relative_humidity),
+            "wind_speed": float(args.constant_wind_speed),
+            "source": "constant",
+            "source_time": args.target_time or "",
+            "latitude": float(lat),
+            "longitude": float(lon),
+            "timezone": args.weather_timezone,
+        }
+
+    weather = fetch_live_weather_features(
+        lat=float(lat),
+        lon=float(lon),
+        target_time=target_time,
+        timezone=args.weather_timezone,
+        timeout_seconds=args.weather_timeout_seconds,
+    )
+    return asdict(weather)
+
+
 def save_one_live_weather_npz(
     row: Any,
     feature_specs: list[Any],
@@ -110,7 +159,7 @@ def save_one_live_weather_npz(
     target_time: datetime | None,
     weather_config: WeatherPatchConfig,
 ) -> tuple[Path, dict[str, Any]]:
-    """Create and save one Model B NPZ patch using live weather layers."""
+    """Create and save one Model B NPZ patch using live or constant weather layers."""
     patch_id = str(row.patch_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{patch_id}.npz"
@@ -131,7 +180,8 @@ def save_one_live_weather_npz(
             "centroid_y": float(centroid_y),
             "centroid_lat": float(lat),
             "centroid_lon": float(lon),
-            "weather_source": "open-meteo",
+            "weather_source": "open-meteo" if args.weather_mode == "api" else "constant",
+            "weather_mode": args.weather_mode,
             "weather_target_time": args.target_time or "",
             "weather_patch_config": asdict(weather_config),
         }
@@ -140,20 +190,19 @@ def save_one_live_weather_npz(
     if output_path.exists() and not args.overwrite:
         return output_path, metadata
 
-    weather = fetch_live_weather_features(
+    weather = get_weather_payload(
         lat=float(lat),
         lon=float(lon),
+        args=args,
         target_time=target_time,
-        timezone=args.weather_timezone,
-        timeout_seconds=args.weather_timeout_seconds,
     )
     weather_patch = generate_weather_patch(
-        temperature=weather.temperature,
-        relative_humidity=weather.relative_humidity,
-        wind_speed=weather.wind_speed,
+        temperature=float(weather["temperature"]),
+        relative_humidity=float(weather["relative_humidity"]),
+        wind_speed=float(weather["wind_speed"]),
         config=weather_config,
     )
-    metadata["weather"] = asdict(weather)
+    metadata["weather"] = weather
     metadata["weather_patch_summary"] = asdict(summarize_weather_patch(weather_patch, weather_config))
 
     bounds = row_bounds(row)
@@ -255,9 +304,17 @@ def write_run_metadata(
         "run_id": args.run_id,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "mode": "validation_saved_npz",
-        "weather_source": "open-meteo",
+        "weather_source": "open-meteo" if args.weather_mode == "api" else "constant",
+        "weather_mode": args.weather_mode,
         "weather_target_time": args.target_time or "",
         "weather_timezone": args.weather_timezone,
+        "constant_weather": {
+            "temperature": args.constant_temperature,
+            "relative_humidity": args.constant_relative_humidity,
+            "wind_speed": args.constant_wind_speed,
+        }
+        if args.weather_mode == "constant"
+        else None,
         "weather_noise": {
             "temperature_noise_scale": args.temperature_noise_scale,
             "humidity_noise_scale": args.humidity_noise_scale,
@@ -305,6 +362,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--run-id", default=default_run_id())
     parser.add_argument("--target-time", default=None, help="Optional ISO datetime for deterministic hourly weather.")
+    parser.add_argument("--weather-mode", choices=sorted(WEATHER_MODES), default="api")
+    parser.add_argument("--constant-temperature", type=float, default=None)
+    parser.add_argument("--constant-relative-humidity", type=float, default=None)
+    parser.add_argument("--constant-wind-speed", type=float, default=None)
     parser.add_argument("--weather-timezone", default=DEFAULT_TIMEZONE)
     parser.add_argument("--weather-timeout-seconds", type=int, default=20)
     parser.add_argument("--temperature-noise-scale", type=float, default=DEFAULT_TEMPERATURE_NOISE_SCALE)
@@ -323,6 +384,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = apply_default_paths(parse_args())
+    validate_weather_args(args)
     if args.batch_size <= 0 or args.patch_size <= 0 or args.resolution_m <= 0:
         raise ValueError("Batch size, patch size, and resolution must be positive.")
 
@@ -339,7 +401,15 @@ def main() -> None:
     print(f"Grid: {args.grid}")
     print(f"Grid CRS: {grid.crs}")
     print(f"Selected patches: {len(selected)}")
+    print(f"Weather mode: {args.weather_mode}")
     print(f"Weather target time: {args.target_time or 'current'}")
+    if args.weather_mode == "constant":
+        print(
+            "Constant weather: "
+            f"temperature={args.constant_temperature}, "
+            f"relative_humidity={args.constant_relative_humidity}, "
+            f"wind_speed={args.constant_wind_speed}"
+        )
     print(f"Saving NPZ patches to: {args.output_dir}")
 
     manifest_rows = create_saved_live_weather_npzs(

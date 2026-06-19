@@ -141,6 +141,30 @@ Prediction-run registry:
 data/validation/state/prediction_runs.csv
 ```
 
+## Summary command
+
+Use the summary command after any manual or scheduled cycle to inspect the current prospective-validation evidence without reading the CSV manually:
+
+```bash
+python -m src.validation.summarize_prospective_validation
+```
+
+The command reads:
+
+```text
+results/validation/prospective_validation_log.csv
+results/validation/latest_prediction_run.txt
+```
+
+It prints:
+
+- validated fire count
+- lead-time median and range
+- nearest-distance medians for Model B candidates, Model A candidates, and Model A positives
+- hit rates at 1 km, 5 km, 10 km, and 25 km
+
+The command is read-only and does not modify validation state, prediction outputs, raw data, rasters, NPZ files, or model artifacts.
+
 ## Check that cron is installed
 
 ```bash

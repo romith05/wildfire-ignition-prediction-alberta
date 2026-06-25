@@ -557,12 +557,12 @@ def main() -> None:
     render_context_panel(run_id)
     render_metric_cards(run_id, validation_df, model_b, model_a)
     tab_flow, tab_map, tab_validation, tab_diagnostics, tab_active = st.tabs([
-	"Operational flow",
-    	"Latest map",
-    	"Prospective validation",
-    	"Research diagnostics",
-    	"Active fires",
-	])
+    "Operational flow",
+        "Latest map",
+        "Prospective validation",
+        "Research diagnostics",
+        "Active fires",
+    ])
     with tab_map:
         st.subheader("Latest model output map")
         render_map(run_id, validation_df, active_fires, max_features=max_map_features)
@@ -570,19 +570,19 @@ def main() -> None:
         render_validation_summary(validation_df)
     with tab_diagnostics:
         diag_tabs = st.tabs(["Threshold sweep", "Ranking", "Feature comparison", "Hard negatives"])
-        with diag_tabs[0]:
-            render_threshold_sweep()
-        with diag_tabs[1]:
-            render_ranking_diagnostic()
-        with diag_tabs[2]:
-            render_feature_comparison()
-        with diag_tabs[3]:
-            render_hard_negative_summary()
+    with diag_tabs[0]:
+         render_threshold_sweep()
+    with diag_tabs[1]:
+         render_ranking_diagnostic()
+    with diag_tabs[2]:
+         render_feature_comparison()
+    with diag_tabs[3]:
+         render_hard_negative_summary()
     with tab_active:
         render_active_fire_table(active_fires)
     with tab_flow:
-    st.subheader("Interactive operational flow")
-    render_interactive_operational_flow()
+            st.subheader("Interactive operational flow")
+            render_interactive_operational_flow()
 
 if __name__ == "__main__":
     main()

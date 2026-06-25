@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
-
+import streamlit.components.v1 as components
 import geopandas as gpd
 import pandas as pd
 import streamlit as st
@@ -384,7 +384,142 @@ def render_active_fire_table(active_fires: pd.DataFrame) -> None:
     columns = [col for col in ["Fire_Name", "Agency", "Start_Date", "Stage_of_Control", "Latitude", "Longitude", "Current_Size"] if col in active_fires.columns]
     st.dataframe(active_fires[columns] if columns else active_fires, use_container_width=True, hide_index=True)
 
+def render_interactive_operational_flow() -> None:
+    """Render a hoverable operational-flow diagram for the conference dashboard."""
+    steps = [
+        ("1", "3-hour automated cycle", "#6b7280", "The operational system is scheduled to run every three hours. Each cycle refreshes active-fire data, validates new fires, and generates a fresh prediction snapshot."),
+        ("2", "Refresh Alberta active-fire feed", "#f97316", "The pipeline downloads the latest Alberta active-fire feed and stores the current snapshot for validation and dashboard display."),
+        ("3", "Prospective validation", "#7c3aed", "Only newly detected fires are validated. Each new fire is compared against prediction snapshots created before the reported fire start time."),
+        ("4", "Append validation results", "#7c3aed", "Validation metrics are appended to the prospective validation log, including lead time, nearest prediction distance, and hit status at 1, 5, 10, and 25 km."),
+        ("5", "Start latest prediction snapshot", "#2563eb", "After validation, the system starts a new full-province prediction run. This saved run becomes the candidate snapshot for future validation cycles."),
+        ("6", "Live weather + geospatial inputs", "#2563eb", "The model uses live weather variables together with static geospatial layers such as elevation, landcover, roads, water, and municipal bands."),
+        ("7", "Model B: 1 km gatekeeper", "#1d4ed8", "Model B scans the province at 1 km resolution and acts as the coarse gatekeeper. It identifies candidate cells where ignition risk may be present."),
+        ("8", "Candidate 1 km cells", "#1d4ed8", "Cells passing the Model B threshold are carried forward as candidates. These are broad regional risk-screening outputs, not final ignition masks."),
+        ("9", "Model A: 25 m spatial refinement", "#0f766e", "Model A evaluates candidate areas at finer 25 m resolution. It acts as a spatial refinement and confirmation stage for Model B candidates."),
+        ("10", "Export outputs", "#15803d", "The run exports CSV, GeoJSON, and summary files. These files are used by the dashboard and validation tools."),
+        ("11", "Update latest-run pointer", "#15803d", "When the run finishes successfully, the latest-run pointer is updated so the dashboard automatically reads the newest completed prediction snapshot."),
+        ("12", "Conference dashboard", "#ea580c", "The dashboard is read-only. It displays latest saved outputs, validation metrics, research diagnostics, and active-fire information without running inference live."),
+    ]
 
+    cards_html = "".join(
+        f"""
+        <div class="flow-card" style="--accent:{accent}">
+            <div class="step-badge">{number}</div>
+            <div class="step-title">{title}</div>
+            <div class="tooltip-box">{detail}</div>
+        </div>
+        """
+        for number, title, accent, detail in steps
+    )
+
+    html = f"""
+    <style>
+        .flow-wrapper {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            padding: 16px 8px 34px 8px;
+        }}
+        .flow-title {{
+            text-align: center;
+            font-size: 30px;
+            font-weight: 850;
+            color: #0f172a;
+            margin-bottom: 8px;
+        }}
+        .flow-subtitle {{
+            text-align: center;
+            font-size: 14px;
+            color: #475569;
+            margin-bottom: 28px;
+        }}
+        .flow-grid {{
+            display: grid;
+            grid-template-columns: repeat(6, minmax(135px, 1fr));
+            gap: 18px;
+            align-items: stretch;
+        }}
+        .flow-card {{
+            position: relative;
+            border: 2px solid var(--accent);
+            border-radius: 16px;
+            background: #ffffff;
+            min-height: 118px;
+            padding: 18px 12px 14px 12px;
+            box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            cursor: help;
+            text-align: center;
+        }}
+        .flow-card:hover {{
+            transform: translateY(-4px);
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.18);
+            z-index: 20;
+        }}
+        .step-badge {{
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            background: var(--accent);
+            color: white;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            margin-bottom: 10px;
+        }}
+        .step-title {{
+            font-size: 15px;
+            font-weight: 750;
+            color: #111827;
+            line-height: 1.25;
+        }}
+        .tooltip-box {{
+            display: none;
+            position: absolute;
+            left: 50%;
+            top: 105%;
+            transform: translateX(-50%);
+            width: 280px;
+            background: #0f172a;
+            color: #ffffff;
+            padding: 14px 16px;
+            border-radius: 12px;
+            font-size: 13px;
+            line-height: 1.35;
+            text-align: left;
+            box-shadow: 0 14px 32px rgba(15, 23, 42, 0.35);
+        }}
+        .tooltip-box::before {{
+            content: "";
+            position: absolute;
+            left: 50%;
+            top: -8px;
+            transform: translateX(-50%);
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-bottom: 8px solid #0f172a;
+        }}
+        .flow-card:hover .tooltip-box {{
+            display: block;
+        }}
+        .flow-footer {{
+            margin-top: 34px;
+            text-align: center;
+            color: #64748b;
+            font-size: 13px;
+            font-style: italic;
+        }}
+    </style>
+
+    <div class="flow-wrapper">
+        <div class="flow-title">Operational Flow of the Live Wildfire Ignition-Risk System</div>
+        <div class="flow-subtitle">Hover over each step to view the detailed explanation.</div>
+        <div class="flow-grid">{cards_html}</div>
+        <div class="flow-footer">
+            Dashboard is read-only: it displays saved pipeline outputs and does not run inference live.
+        </div>
+    </div>
+    """
+    components.html(html, height=760, scrolling=True)
 def render_context_panel(run_id: str | None) -> None:
     st.markdown(
         """
@@ -421,8 +556,13 @@ def main() -> None:
 
     render_context_panel(run_id)
     render_metric_cards(run_id, validation_df, model_b, model_a)
-
-    tab_map, tab_validation, tab_diagnostics, tab_active = st.tabs(["Latest map", "Prospective validation", "Research diagnostics", "Active fires"])
+    tab_flow, tab_map, tab_validation, tab_diagnostics, tab_active = st.tabs([
+	"Operational flow",
+    	"Latest map",
+    	"Prospective validation",
+    	"Research diagnostics",
+    	"Active fires",
+	])
     with tab_map:
         st.subheader("Latest model output map")
         render_map(run_id, validation_df, active_fires, max_features=max_map_features)
@@ -440,7 +580,9 @@ def main() -> None:
             render_hard_negative_summary()
     with tab_active:
         render_active_fire_table(active_fires)
-
+    with tab_flow:
+    st.subheader("Interactive operational flow")
+    render_interactive_operational_flow()
 
 if __name__ == "__main__":
     main()

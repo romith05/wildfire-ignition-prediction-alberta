@@ -104,6 +104,43 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def bundle_relative_path(path: str | Path, output_dir: Path) -> str:
+    """Return a path that is safe to publish in metadata.
+
+    Metadata is included in the public repo, so it must not contain absolute
+    university filesystem paths. Files inside the bundle are recorded relative
+    to ``public_dashboard_bundle/``. Source files are already repository-relative
+    in normal use; if an absolute source slips in, only its filename is exposed.
+    """
+    p = Path(path)
+    try:
+        return p.resolve().relative_to(output_dir.resolve()).as_posix()
+    except Exception:
+        text = str(p)
+        if value_looks_internal(text):
+            return p.name
+        return text.replace("\\", "/")
+
+
+def exported_file_metadata(file: ExportedFile, output_dir: Path) -> dict[str, Any]:
+    return {
+        "source": bundle_relative_path(file.source, output_dir),
+        "output": bundle_relative_path(file.output, output_dir),
+        "bytes": file.bytes,
+        "sha256": file.sha256,
+        "rows": file.rows,
+        "columns": file.columns,
+    }
+
+
+def safe_missing_file_metadata(path: str) -> str:
+    p = Path(path)
+    text = str(p)
+    if value_looks_internal(text):
+        return p.name
+    return text.replace("\\", "/")
+
+
 def ensure_safe_output_dir(path: Path) -> None:
     """Validate output directory before deleting/recreating it.
 
@@ -287,9 +324,10 @@ def write_metadata(
             "NPZ patches are not exported.",
             "Model weight files are not exported.",
             "Internal filesystem path columns are removed where detected.",
+            "Metadata paths are stored relative to public_dashboard_bundle/.",
         ],
-        "files": [file.__dict__ for file in exported_files],
-        "missing_optional_files": list(missing_files),
+        "files": [exported_file_metadata(file, output_dir) for file in exported_files],
+        "missing_optional_files": [safe_missing_file_metadata(path) for path in missing_files],
     }
     (output_dir / "metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n",

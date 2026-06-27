@@ -22,15 +22,13 @@ import streamlit.components.v1 as components
 
 try:
     import folium
+    from folium.plugins import HeatMap
     from streamlit_folium import st_folium
 except Exception:
     folium = None
+    HeatMap = None
     st_folium = None
 
-try:
-    import pydeck as pdk
-except Exception:
-    pdk = None
 
 
 # ----------------------------------------------------------------------------
@@ -53,6 +51,20 @@ FEATURE_COMPARISON_SUMMARY_CSV = VALIDATION_ROOT / "ranked_candidate_feature_com
 HARD_NEGATIVE_SUMMARY_CSV = VALIDATION_ROOT / "prospective_hard_negative_summary.csv"
 
 DISTANCE_THRESHOLDS_M = [1000, 5000, 10000, 25000]
+
+# Alberta map display bounds.
+ALBERTA_BOUNDS = [[48.85, -120.35], [60.15, -109.45]]
+ALBERTA_CENTER = [54.7, -115.0]
+ALBERTA_START_ZOOM = 6
+ALBERTA_MIN_ZOOM = 6
+ALBERTA_MAX_ZOOM = 18
+
+# Alberta display bounds with a small buffer.
+# Used to keep the map focused on Alberta while still allowing zoom-in.
+ALBERTA_BOUNDS = [[48.85, -120.35], [60.15, -109.45]]
+ALBERTA_CENTER = [54.7, -115.0]
+ALBERTA_MIN_ZOOM = 5
+ALBERTA_MAX_ZOOM = 18
 
 st.set_page_config(
     page_title="Alberta Wildfire Ignition Risk Dashboard",
@@ -232,6 +244,27 @@ def risk_color(tier: str, final_positive: int | None = None) -> str:
     }.get(tier, "#71717A")
 
 
+def probability_heat_color(probability) -> str:
+    """Continuous heatmap-like color for Model A candidate-cell probability."""
+    p = pd.to_numeric(probability, errors="coerce")
+    if pd.isna(p):
+        return "#71717A"
+    p = float(max(0.0, min(1.0, p)))
+    if p >= 0.90:
+        return "#7F0000"
+    if p >= 0.80:
+        return "#D7301F"
+    if p >= 0.70:
+        return "#FC8D59"
+    if p >= 0.60:
+        return "#FDBB84"
+    if p >= 0.50:
+        return "#FEE08B"
+    if p >= 0.30:
+        return "#D9EF8B"
+    return "#91CF60"
+
+
 def hit_rate_accent(frac: float | None) -> str:
     if frac is None or pd.isna(frac): return "#71717A"
     if frac >= 0.90: return "#84CC16"
@@ -352,6 +385,7 @@ def render_kpi_strip(run_id: str | None, validation_df: pd.DataFrame,
                  sub="across candidate cells", accent="#A1A1AA")
 
 
+
 # ----------------------------------------------------------------------------
 # Map (Folium)
 # ----------------------------------------------------------------------------
@@ -362,142 +396,439 @@ def prepare_map_cells(run_dir: Path) -> gpd.GeoDataFrame:
     if cells.crs is None:
         st.warning("Map layer has no CRS")
         return gpd.GeoDataFrame()
+
     cells = cells.copy()
-    for c in ["cell_max_prob", "probability"]:
-        if c in cells.columns:
-            cells[c] = pd.to_numeric(cells[c], errors="coerce")
+
+    for col in ["cell_max_prob", "probability"]:
+        if col in cells.columns:
+            cells[col] = pd.to_numeric(cells[col], errors="coerce")
+
     if "cell_max_prob" not in cells.columns and "probability" in cells.columns:
         cells["cell_max_prob"] = cells["probability"]
+
     if "cell_max_prob" not in cells.columns:
         cells["cell_max_prob"] = pd.NA
-    cells["final_positive"] = (
-        pd.to_numeric(cells["final_positive"], errors="coerce").fillna(0).astype(int)
-        if "final_positive" in cells.columns else 0
-    )
+
+    if "final_positive" in cells.columns:
+        cells["final_positive"] = pd.to_numeric(
+            cells["final_positive"], errors="coerce"
+        ).fillna(0).astype(int)
+    else:
+        cells["final_positive"] = 0
+
     cells["risk_tier"] = cells["cell_max_prob"].apply(risk_tier)
     return cells.to_crs("EPSG:4326")
 
 
-def add_candidate_cells_to_map(m, cells, max_features):
-    if cells.empty: return
+def create_bounded_alberta_map():
+    """Create an OpenStreetMap map constrained to Alberta."""
+    m = folium.Map(
+        location=ALBERTA_CENTER,
+        zoom_start=ALBERTA_START_ZOOM,
+        tiles="OpenStreetMap",
+        min_zoom=ALBERTA_MIN_ZOOM,
+        max_zoom=ALBERTA_MAX_ZOOM,
+        control_scale=True,
+        prefer_canvas=True,
+    )
+
+    folium.Rectangle(
+        bounds=ALBERTA_BOUNDS,
+        color="#111111",
+        weight=1,
+        fill=False,
+        opacity=0.65,
+        name="Alberta map boundary",
+        show=True,
+    ).add_to(m)
+
+    map_name = m.get_name()
+    bounds_js = "[[48.85, -120.35], [60.15, -109.45]]"
+
+    m.get_root().script.add_child(
+        folium.Element(
+            f"""
+            setTimeout(function() {{
+                var map = {map_name};
+                var bounds = L.latLngBounds({bounds_js});
+
+                map.setMaxBounds(bounds);
+                map.options.maxBoundsViscosity = 1.0;
+                map.setMinZoom({ALBERTA_MIN_ZOOM});
+                map.setMaxZoom({ALBERTA_MAX_ZOOM});
+
+                if (map.getZoom() < {ALBERTA_MIN_ZOOM}) {{
+                    map.setZoom({ALBERTA_MIN_ZOOM});
+                }}
+
+                map.on('zoomend', function() {{
+                    if (map.getZoom() < {ALBERTA_MIN_ZOOM}) {{
+                        map.setZoom({ALBERTA_MIN_ZOOM});
+                    }}
+                    map.panInsideBounds(bounds, {{animate: false}});
+                }});
+
+                map.on('dragend moveend', function() {{
+                    map.panInsideBounds(bounds, {{animate: false}});
+                }});
+            }}, 500);
+            """
+        )
+    )
+
+    return m
+
+
+def _heatmap_points_from_cells(cells: gpd.GeoDataFrame, max_features: int) -> list[list[float]]:
+    if cells.empty or "cell_max_prob" not in cells.columns:
+        return []
+
+    layer = cells.copy()
+    layer["cell_max_prob"] = pd.to_numeric(layer["cell_max_prob"], errors="coerce").fillna(0).clip(0, 1)
+
+    if len(layer) > max_features:
+        layer = layer.sort_values("cell_max_prob", ascending=False).head(max_features).copy()
+
+    pts = layer.geometry.representative_point()
+
+    return [
+        [float(pt.y), float(pt.x), float(prob)]
+        for pt, prob in zip(pts, layer["cell_max_prob"])
+        if float(prob) > 0
+    ]
+
+
+def add_model_a_probability_heatmap(m, cells: gpd.GeoDataFrame, max_features: int) -> None:
+    if cells.empty or HeatMap is None:
+        return
+
+    heat_data = _heatmap_points_from_cells(cells, max_features)
+    if not heat_data:
+        return
+
+    HeatMap(
+        heat_data,
+        name="Model A probability heatmap",
+        min_opacity=0.22,
+        max_opacity=0.86,
+        radius=24,
+        blur=20,
+        max_zoom=9,
+        gradient={
+            0.10: "#91CF60",
+            0.35: "#D9EF8B",
+            0.55: "#FEE08B",
+            0.70: "#FDBB84",
+            0.85: "#FC8D59",
+            1.00: "#D7301F",
+        },
+        show=True,
+    ).add_to(m)
+
+
+def infer_probability_column(df: pd.DataFrame) -> str | None:
+    candidates = [
+        "model_b_probability",
+        "probability",
+        "score",
+        "risk_score",
+        "prediction",
+        "pred_prob",
+        "candidate_probability",
+        "max_probability",
+    ]
+    for col in candidates:
+        if col in df.columns:
+            return col
+
+    probability_like = [
+        col for col in df.columns
+        if ("prob" in col.lower() or "score" in col.lower())
+        and pd.to_numeric(df[col], errors="coerce").notna().any()
+    ]
+    return probability_like[0] if probability_like else None
+
+
+
+def add_model_b_candidate_probability_heatmap(m, model_b_candidates: pd.DataFrame, max_features: int) -> None:
+    """Add Model B 1 km candidate probabilities as a heatmap.
+
+    model_b_candidates.csv stores coordinates in EPSG:3979:
+      cell_xmin, cell_ymin, cell_xmax, cell_ymax, probability
+
+    This function converts the candidate-cell centers to EPSG:4326 for Folium.
+    """
+    required = {"cell_xmin", "cell_ymin", "cell_xmax", "cell_ymax", "probability"}
+    if model_b_candidates.empty or HeatMap is None or not required.issubset(model_b_candidates.columns):
+        return
+
+    df = model_b_candidates.copy()
+
+    for col in ["cell_xmin", "cell_ymin", "cell_xmax", "cell_ymax", "probability"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["cell_xmin", "cell_ymin", "cell_xmax", "cell_ymax", "probability"])
+    if df.empty:
+        return
+
+    df["probability"] = df["probability"].clip(0.0, 1.0)
+    df["x_center"] = (df["cell_xmin"] + df["cell_xmax"]) / 2.0
+    df["y_center"] = (df["cell_ymin"] + df["cell_ymax"]) / 2.0
+
+    if len(df) > max_features:
+        df = df.sort_values("probability", ascending=False).head(max_features).copy()
+
+    points = gpd.GeoDataFrame(
+        df,
+        geometry=gpd.points_from_xy(df["x_center"], df["y_center"]),
+        crs="EPSG:3979",
+    ).to_crs("EPSG:4326")
+
+    heat_data = [
+        [float(row.geometry.y), float(row.geometry.x), float(row["probability"])]
+        for _, row in points.iterrows()
+        if float(row["probability"]) > 0
+    ]
+
+    if not heat_data:
+        return
+
+    HeatMap(
+        heat_data,
+        name="Model B 1 km candidate probability heatmap",
+        min_opacity=0.20,
+        max_opacity=0.82,
+        radius=34,
+        blur=24,
+        max_zoom=9,
+        gradient={
+            0.10: "#DBEAFE",
+            0.35: "#93C5FD",
+            0.55: "#3B82F6",
+            0.75: "#1D4ED8",
+            1.00: "#312E81",
+        },
+        show=False,
+    ).add_to(m)
+
+
+def add_model_b_candidate_grid_to_map(m, model_b_candidates: pd.DataFrame, max_features: int) -> None:
+    """Add exact Model B 1 km candidate cells as a toggleable polygon layer."""
+    required = {"cell_xmin", "cell_ymin", "cell_xmax", "cell_ymax", "probability"}
+    if model_b_candidates.empty or not required.issubset(model_b_candidates.columns):
+        return
+
+    df = model_b_candidates.copy()
+
+    for col in ["cell_xmin", "cell_ymin", "cell_xmax", "cell_ymax", "probability"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna(subset=["cell_xmin", "cell_ymin", "cell_xmax", "cell_ymax", "probability"])
+    if df.empty:
+        return
+
+    df["probability"] = df["probability"].clip(0.0, 1.0)
+
+    if len(df) > max_features:
+        df = df.sort_values("probability", ascending=False).head(max_features).copy()
+
+    from shapely.geometry import box
+
+    geoms = [
+        box(row["cell_xmin"], row["cell_ymin"], row["cell_xmax"], row["cell_ymax"])
+        for _, row in df.iterrows()
+    ]
+
+    cells = gpd.GeoDataFrame(df, geometry=geoms, crs="EPSG:3979").to_crs("EPSG:4326")
+
+    def style(feature):
+        p = feature.get("properties", {})
+        prob = p.get("probability", 0.0)
+        color = "#312E81"
+        try:
+            prob = float(prob)
+        except Exception:
+            prob = 0.0
+
+        if prob >= 0.90:
+            color = "#312E81"
+        elif prob >= 0.75:
+            color = "#1D4ED8"
+        elif prob >= 0.55:
+            color = "#3B82F6"
+        elif prob >= 0.35:
+            color = "#93C5FD"
+        else:
+            color = "#DBEAFE"
+
+        return {
+            "fillColor": color,
+            "color": color,
+            "weight": 0.7,
+            "fillOpacity": 0.30,
+        }
+
+    tooltip_fields = [
+        col for col in ["candidate_id", "patch_id", "probability", "row", "col"]
+        if col in cells.columns
+    ]
+
+    folium.GeoJson(
+        cells,
+        name="Exact Model B 1 km candidate grid",
+        style_function=style,
+        tooltip=folium.GeoJsonTooltip(fields=tooltip_fields) if tooltip_fields else None,
+        show=False,
+    ).add_to(m)
+
+def add_candidate_cells_to_map(m, cells: gpd.GeoDataFrame, max_features: int) -> None:
+    if cells.empty:
+        return
+
     layer = cells.copy()
     if len(layer) > max_features:
         layer = layer.sort_values("cell_max_prob", ascending=False).head(max_features).copy()
 
     def style(feat):
         p = feat.get("properties", {})
-        c = risk_color(p.get("risk_tier", "Unknown"), p.get("final_positive"))
-        return {"fillColor": c, "color": c, "weight": 1,
-                "fillOpacity": 0.55 if p.get("final_positive") == 1 else 0.32}
+        c = probability_heat_color(p.get("cell_max_prob"))
+        return {
+            "fillColor": c,
+            "color": c,
+            "weight": 0.7,
+            "fillOpacity": 0.34,
+        }
 
-    tooltip_fields = [f for f in ["candidate_id", "cell_max_prob", "risk_tier", "final_positive"] if f in layer.columns]
+    tooltip_fields = [
+        col for col in ["candidate_id", "cell_max_prob", "risk_tier", "final_positive"]
+        if col in layer.columns
+    ]
+
     folium.GeoJson(
-        layer, name="Model A candidate cells", style_function=style,
+        layer,
+        name="Exact Model A probability grid",
+        style_function=style,
         tooltip=folium.GeoJsonTooltip(fields=tooltip_fields) if tooltip_fields else None,
+        show=False,
     ).add_to(m)
 
 
-def add_fire_points_to_map(m, df, name, color, radius=5):
-    if df.empty: return
+def add_probability_legend(m) -> None:
+    legend_html = """
+    <div style="
+        position: fixed;
+        bottom: 34px;
+        left: 34px;
+        z-index: 9999;
+        background: rgba(255,255,255,0.94);
+        border: 1px solid #cfcfcf;
+        border-radius: 8px;
+        padding: 10px 12px;
+        font-family: Arial, sans-serif;
+        font-size: 12px;
+        color: #111;
+        box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+    ">
+        <div style="font-weight:700;margin-bottom:6px;">Probability heatmap</div>
+        <div style="width:185px;height:12px;background:linear-gradient(to right,#91CF60,#D9EF8B,#FEE08B,#FDBB84,#FC8D59,#D7301F);border-radius:4px;"></div>
+        <div style="display:flex;justify-content:space-between;margin-top:4px;">
+            <span>Lower</span><span>Higher</span>
+        </div>
+        <div style="margin-top:6px;color:#444;">Model A shown by default. Model B is toggleable.</div>
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+
+def add_fire_points_to_map(m, df: pd.DataFrame, name: str, color: str, radius: int = 5) -> None:
+    if df.empty:
+        return
+
     lat_col, lon_col = infer_lat_lon_columns(df)
-    if lat_col is None or lon_col is None: return
+    if lat_col is None or lon_col is None:
+        return
+
     group = folium.FeatureGroup(name=name, show=True)
-    for row in df.itertuples(index=False):
-        lat = pd.to_numeric(getattr(row, lat_col), errors="coerce")
-        lon = pd.to_numeric(getattr(row, lon_col), errors="coerce")
-        if pd.isna(lat) or pd.isna(lon): continue
-        fid = (getattr(row, "fire_id", None) or getattr(row, "fire_id_normalized", None)
-               or getattr(row, "Fire_Name", None) or "Fire")
+
+    for _, row in df.iterrows():
+        lat = pd.to_numeric(row.get(lat_col), errors="coerce")
+        lon = pd.to_numeric(row.get(lon_col), errors="coerce")
+
+        if pd.isna(lat) or pd.isna(lon):
+            continue
+
+        fid = (
+            row.get("fire_id")
+            or row.get("fire_id_normalized")
+            or row.get("Fire_Name")
+            or "Fire"
+        )
+
         popup = [f"<b>{fid}</b>"]
-        for f in ["lead_time_hours", "model_a_positive_nearest_distance_m",
-                  "model_b_candidate_nearest_distance_m"]:
-            if f in df.columns:
-                v = getattr(row, f, None)
-                if pd.notna(v): popup.append(f"{f}: {v}")
+        for field in [
+            "lead_time_hours",
+            "model_a_positive_nearest_distance_m",
+            "model_b_candidate_nearest_distance_m",
+        ]:
+            if field in df.columns and pd.notna(row.get(field)):
+                popup.append(f"{field}: {row.get(field)}")
+
         folium.CircleMarker(
-            location=[float(lat), float(lon)], radius=radius,
-            color=color, fill=True, fill_color=color, fill_opacity=0.9,
+            location=[float(lat), float(lon)],
+            radius=radius,
+            color=color,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.9,
             popup="<br>".join(popup),
         ).add_to(group)
+
         if name.lower().startswith("validated"):
-            folium.Circle(location=[float(lat), float(lon)], radius=25_000,
-                          color=color, fill=False, weight=1, opacity=0.4).add_to(group)
+            folium.Circle(
+                location=[float(lat), float(lon)],
+                radius=25_000,
+                color=color,
+                fill=False,
+                weight=1,
+                opacity=0.4,
+            ).add_to(group)
+
     group.add_to(m)
 
 
-def render_map(run_id, validation_df, active_fires, max_features):
+def render_map(run_id, validation_df, active_fires, model_b, max_features):
     if folium is None or st_folium is None:
-        st.info("pip install streamlit-folium folium to enable the interactive map.")
+        st.info("Install map dependencies: pip install streamlit-folium folium")
         return
-    m = folium.Map(location=[54.7, -115.0], zoom_start=5, tiles="CartoDB dark_matter")
+
+    m = create_bounded_alberta_map()
+
     if run_id:
         cells = prepare_map_cells(RUNS_ROOT / run_id)
+        add_model_a_probability_heatmap(m, cells, max_features=max_features)
         add_candidate_cells_to_map(m, cells, max_features=max_features)
-    add_fire_points_to_map(m, active_fires, "Current active fires", "#A78BFA", radius=4)
-    add_fire_points_to_map(m, validated_fires(validation_df),
-                           "Validated prospective fires + 25 km buffer", "#84CC16", radius=6)
+        add_model_b_candidate_probability_heatmap(m, model_b, max_features=max_features)
+        add_model_b_candidate_grid_to_map(m, model_b, max_features=max_features)
+        add_probability_legend(m)
+
+    add_fire_points_to_map(m, active_fires, "Current active fires", "#7C3AED", radius=4)
+    add_fire_points_to_map(
+        m,
+        validated_fires(validation_df),
+        "Validated prospective fires + 25 km buffer",
+        "#15803D",
+        radius=6,
+    )
+
     folium.LayerControl(collapsed=False).add_to(m)
-    st_folium(m, height=650, use_container_width=True)
 
+    st_folium(
+        m,
+        height=650,
+        use_container_width=True,
+        returned_objects=[],
+    )
 
-# ----------------------------------------------------------------------------
-# 3D risk surface (pydeck)
-# ----------------------------------------------------------------------------
-def render_3d_risk_surface(run_id: str | None) -> None:
-    if pdk is None:
-        st.info("pip install pydeck to enable the 3D risk surface.")
-        return
-    if not run_id:
-        st.info("No latest run selected.")
-        return
-    cells = prepare_map_cells(RUNS_ROOT / run_id)
-    if cells.empty:
-        st.info("No candidate cells available for this run.")
-        return
-    pts = cells.copy()
-    pts["lon"] = pts.geometry.centroid.x
-    pts["lat"] = pts.geometry.centroid.y
-    pts["prob"] = pd.to_numeric(pts["cell_max_prob"], errors="coerce").fillna(0.0)
-    pts = pts[pts["prob"] > 0]
-    if pts.empty:
-        st.info("All candidate probabilities are zero; nothing to render in 3D.")
-        return
-
-    layer = pdk.Layer(
-        "HexagonLayer",
-        data=pts[["lon", "lat", "prob"]],
-        get_position=["lon", "lat"],
-        get_elevation_weight="prob",
-        elevation_scale=12000,
-        elevation_range=[0, 80000],
-        radius=8000,
-        extruded=True,
-        pickable=True,
-        coverage=0.9,
-        color_range=[
-            [132, 204, 22],   # safe
-            [255, 159, 10],   # warning
-            [255, 87, 34],    # blaze
-            [255, 59, 48],    # danger
-        ],
-    )
-    view = pdk.ViewState(
-        latitude=float(pts["lat"].mean()),
-        longitude=float(pts["lon"].mean()),
-        zoom=4.2, pitch=52, bearing=18,
-    )
-    deck = pdk.Deck(
-        layers=[layer],
-        initial_view_state=view,
-        map_style="dark",
-        tooltip={"text": "Ignition risk density\nlat: {position[1]}\nlon: {position[0]}"},
-    )
-    st.pydeck_chart(deck, use_container_width=True)
-    st.caption(
-        "Hex columns aggregate Model A candidate-cell probabilities. "
-        "Height ∝ summed probability; color from low (lime) to extreme (red). "
-        "Drag to rotate · Scroll to zoom · Shift+drag to tilt."
-    )
 
 
 # ----------------------------------------------------------------------------
@@ -676,153 +1007,550 @@ def render_active_fire_table(active_fires: pd.DataFrame) -> None:
     )
 
 
+
 # ----------------------------------------------------------------------------
-# Operational flow — grouped stage bands
+# Operational flow — image-like hover tile flow
 # ----------------------------------------------------------------------------
-STAGES = [
-    ("SCHEDULE", "#6b7280", [
-        ("1", "3-hour automated cycle",
-         "Runs every three hours: refresh active fires, validate, regenerate snapshot."),
-    ]),
-    ("VALIDATE", "#7c3aed", [
-        ("2", "Refresh active-fire feed",
-         "Downloads Alberta active-fire feed and stores current snapshot."),
-        ("3", "Prospective validation",
-         "New fires compared against snapshots created before reported start."),
-        ("4", "Append validation log",
-         "Logs lead time, nearest distance, and hit status at 1/5/10/25 km."),
-    ]),
-    ("PREDICT", "#2563eb", [
-        ("5", "Start prediction snapshot",
-         "Begin a new full-province prediction run for the next validation cycle."),
-        ("6", "Live weather + geospatial",
-         "Weather + static layers: elevation, landcover, roads, water, municipal bands."),
-    ]),
-    ("REFINE", "#0f766e", [
-        ("7", "Model B · 1 km gatekeeper",
-         "Coarse provincial scan flagging candidate cells."),
-        ("8", "Candidate 1 km cells",
-         "Cells above threshold carried forward — broad screening, not final."),
-        ("9", "Model A · 25 m refinement",
-         "Fine-grained confirmation over candidate areas."),
-    ]),
-    ("PUBLISH", "#15803d", [
-        ("10", "Export outputs",
-         "CSV, GeoJSON, summary files written to results/runs/."),
-        ("11", "Update latest-run pointer",
-         "Dashboard auto-reads the newest completed run."),
-    ]),
-    ("DISPLAY", "#ea580c", [
-        ("12", "Conference dashboard",
-         "Read-only display of saved outputs, validation, and diagnostics."),
-    ]),
+FLOW_STEPS = [
+    {
+        "number": "1",
+        "title": "3-hour automated cycle",
+        "section": "Schedule",
+        "accent": "#6b7280",
+        "icon": "⏱",
+        "detail": "The operational system runs every three hours. Each cycle refreshes fire data, validates new fires, and creates a fresh prediction snapshot.",
+    },
+    {
+        "number": "2",
+        "title": "Refresh Alberta active-fire feed",
+        "section": "Validation",
+        "accent": "#7c3aed",
+        "icon": "🔥",
+        "detail": "Downloads the latest Alberta active-fire feed and stores the current fire snapshot for validation and dashboard display.",
+    },
+    {
+        "number": "3",
+        "title": "Prospective validation",
+        "section": "Validation",
+        "accent": "#7c3aed",
+        "icon": "✓",
+        "detail": "Only newly detected fires are validated. Each fire is compared against prediction snapshots created before the reported fire start time.",
+    },
+    {
+        "number": "4",
+        "title": "Append validation results",
+        "section": "Validation",
+        "accent": "#7c3aed",
+        "icon": "📋",
+        "detail": "Adds lead time, nearest prediction distance, and hit status at 1, 5, 10, and 25 km to the prospective validation log.",
+    },
+    {
+        "number": "5",
+        "title": "Start latest prediction snapshot",
+        "section": "Prediction",
+        "accent": "#2563eb",
+        "icon": "▶",
+        "detail": "Starts a new full-province prediction run after validation. This saved run becomes the next candidate snapshot for future validation.",
+    },
+    {
+        "number": "6",
+        "title": "Live weather + geospatial inputs",
+        "section": "Prediction",
+        "accent": "#2563eb",
+        "icon": "🌦",
+        "detail": "Combines live weather variables with static geospatial layers such as elevation, landcover, roads, water, and municipal bands.",
+    },
+    {
+        "number": "7",
+        "title": "Model B: 1 km gatekeeper",
+        "section": "Screening",
+        "accent": "#1d4ed8",
+        "icon": "🔎",
+        "detail": "Scans the province at 1 km resolution and identifies coarse candidate cells with elevated ignition susceptibility.",
+    },
+    {
+        "number": "8",
+        "title": "Candidate 1 km cells",
+        "section": "Screening",
+        "accent": "#1d4ed8",
+        "icon": "▦",
+        "detail": "Cells passing the Model B threshold are carried forward as broad regional candidates. These are screening outputs, not final ignition masks.",
+    },
+    {
+        "number": "9",
+        "title": "Model A: 25 m spatial refinement",
+        "section": "Refinement",
+        "accent": "#0f766e",
+        "icon": "◎",
+        "detail": "Runs only on Model B candidate areas and provides finer local spatial assessment at 25 m resolution.",
+    },
+    {
+        "number": "10",
+        "title": "Export outputs",
+        "section": "Publish",
+        "accent": "#15803d",
+        "icon": "⬇",
+        "detail": "Writes CSV, GeoJSON, and summary files into the results folder. These files power the map, metrics, and diagnostics.",
+    },
+    {
+        "number": "11",
+        "title": "Update latest-run pointer",
+        "section": "Publish",
+        "accent": "#15803d",
+        "icon": "↻",
+        "detail": "Updates the latest-run pointer so the dashboard automatically reads the newest completed prediction snapshot.",
+    },
+    {
+        "number": "12",
+        "title": "Conference dashboard",
+        "section": "Display",
+        "accent": "#ea580c",
+        "icon": "▣",
+        "detail": "Read-only web view showing the latest map, prospective validation metrics, active-fire table, and research diagnostics.",
+    },
 ]
 
 
 def render_interactive_operational_flow() -> None:
-    bands_html = []
-    for band_label, accent, steps in STAGES:
-        cards = "".join(
-            f"""
-            <div class="flow-card" style="--accent:{accent}">
-                <div class="step-badge">{n}</div>
-                <div class="step-title">{title}</div>
-                <div class="tooltip-box">{detail}</div>
-            </div>
-            """ for n, title, detail in steps
-        )
-        bands_html.append(f"""
-        <div class="stage-band" style="--band:{accent}">
-            <div class="stage-label">{band_label}</div>
-            <div class="stage-cards">{cards}</div>
-        </div>
-        """)
+    """Pixel-faithful reproduction of the operational-flow diagram.
+    Independent style — does not depend on or affect the rest of the dashboard CSS.
+    """
 
-    html = f"""
+    # Palette per stage group (matches the reference image)
+    GRAY   = {"border": "#9CA3AF", "fill": "#F3F4F6", "badge": "#6B7280"}
+    PURPLE = {"border": "#A78BFA", "fill": "#F5F3FF", "badge": "#7C3AED"}
+    BLUE_L = {"border": "#93C5FD", "fill": "#EFF6FF", "badge": "#2563EB"}
+    BLUE_D = {"border": "#2563EB", "fill": "#DBEAFE", "badge": "#1D4ED8"}
+    GREEN  = {"border": "#34D399", "fill": "#ECFDF5", "badge": "#15803D"}
+    ORANGE = {"border": "#FB923C", "fill": "#FFF7ED", "badge": "#EA580C"}
+
+    # Top-row steps (1..7, 9) — step 8 sits below step 7 as a dashed callout
+    top_row = [
+        ("1", "🕐", ["3-hour", "automated cycle"], "", GRAY),
+        ("2", "🔥", ["Refresh Alberta", "active-fire feed"], "", GRAY),
+        ("3", "🔍", ["Prospective", "validation"],
+            "compare new fires against earlier prediction snapshots", PURPLE),
+        ("4", "📋", ["Append validation", "results"], "", PURPLE),
+        ("5", "🗄️", ["Start latest", "prediction snapshot"], "", BLUE_L),
+        ("6", "⛅", ["Live weather +", "geospatial inputs"], "", BLUE_L),
+        ("7", "📍", ["Model B:", "1 km gatekeeper"], "", BLUE_D),
+        ("9", "🗺️", ["Model A:", "25 m spatial refinement"], "", BLUE_D),
+    ]
+
+    # Geometry
+    TILE_W, TILE_H, GAP = 160, 230, 38
+    X0, Y0 = 40, 70  # top-left of first tile
+
+    def tile_svg(x, y, w, h, num, icon, lines, sub, theme, dashed=False, badge_inside=True):
+        stroke_dash = 'stroke-dasharray="8 6"' if dashed else ''
+        # Card
+        card = (
+            f'<rect x="{x}" y="{y}" rx="14" ry="14" width="{w}" height="{h}" '
+            f'fill="{theme["fill"]}" stroke="{theme["border"]}" stroke-width="2.4" {stroke_dash}/>'
+        )
+        # Icon
+        icon_svg = (
+            f'<text x="{x + w/2}" y="{y + 56}" text-anchor="middle" '
+            f'font-size="34">{icon}</text>'
+        )
+        # Numbered badge (circle + number)
+        badge_cx, badge_cy = x + w/2, y + 100
+        badge = (
+            f'<circle cx="{badge_cx}" cy="{badge_cy}" r="17" fill="{theme["badge"]}"/>'
+            f'<text x="{badge_cx}" y="{badge_cy + 5}" text-anchor="middle" '
+            f'fill="#fff" font-size="14" font-weight="800" '
+            f'font-family="Inter, system-ui, sans-serif">{num}</text>'
+        )
+        # Title lines
+        title = ""
+        title_y = y + 145
+        for i, line in enumerate(lines):
+            title += (
+                f'<text x="{x + w/2}" y="{title_y + i*20}" text-anchor="middle" '
+                f'fill="#0F172A" font-size="14.5" font-weight="700" '
+                f'font-family="Inter, system-ui, sans-serif">{line}</text>'
+            )
+        # Sub caption (wrapped)
+        sub_svg = ""
+        if sub:
+            sub_y = title_y + len(lines) * 20 + 14
+            words = sub.split()
+            chunks, line_words, char_count = [], [], 0
+            for w_ in words:
+                if char_count + len(w_) > 22 and line_words:
+                    chunks.append(" ".join(line_words))
+                    line_words, char_count = [w_], len(w_)
+                else:
+                    line_words.append(w_)
+                    char_count += len(w_) + 1
+            if line_words:
+                chunks.append(" ".join(line_words))
+            for i, chunk in enumerate(chunks):
+                sub_svg += (
+                    f'<text x="{x + w/2}" y="{sub_y + i*14}" text-anchor="middle" '
+                    f'fill="#475569" font-size="11" font-style="italic" '
+                    f'font-family="Inter, system-ui, sans-serif">{chunk}</text>'
+                )
+        return card + icon_svg + badge + title + sub_svg
+
+    # Build top row tiles + horizontal arrows between consecutive top-row tiles
+    tiles_svg = ""
+    arrows_svg = ""
+    positions = []
+    for i, (num, icon, lines, sub, theme) in enumerate(top_row):
+        x = X0 + i * (TILE_W + GAP)
+        y = Y0
+        positions.append((x, y))
+        tiles_svg += tile_svg(x, y, TILE_W, TILE_H, num, icon, lines, sub, theme)
+
+    # Arrows between top row tiles (1→2, 2→3, ... 6→7, 7→9 with skip handled by index)
+    for i in range(len(top_row) - 1):
+        x_from = positions[i][0] + TILE_W
+        x_to = positions[i + 1][0]
+        y_mid = Y0 + TILE_H / 2
+        arrows_svg += (
+            f'<line x1="{x_from + 2}" y1="{y_mid}" x2="{x_to - 6}" y2="{y_mid}" '
+            f'stroke="#334155" stroke-width="2.2" marker-end="url(#arrow)"/>'
+        )
+
+    # ── Step 8: dashed callout below step 7
+    step7_x, step7_y = positions[6]
+    step9_x, step9_y = positions[7]
+    callout_x = step7_x + TILE_W / 2 - 95
+    callout_y = step7_y + TILE_H + 70
+    callout_w, callout_h = 190, 110
+    callout = (
+        f'<rect x="{callout_x}" y="{callout_y}" rx="18" ry="18" '
+        f'width="{callout_w}" height="{callout_h}" fill="#EFF6FF" '
+        f'stroke="#2563EB" stroke-width="2.2" stroke-dasharray="6 5"/>'
+        f'<text x="{callout_x + callout_w/2}" y="{callout_y + 40}" text-anchor="middle" '
+        f'font-size="28">🎯</text>'
+        f'<text x="{callout_x + callout_w/2}" y="{callout_y + 72}" text-anchor="middle" '
+        f'fill="#0F172A" font-size="14" font-weight="700" '
+        f'font-family="Inter, system-ui, sans-serif">Candidate</text>'
+        f'<text x="{callout_x + callout_w/2}" y="{callout_y + 90}" text-anchor="middle" '
+        f'fill="#0F172A" font-size="14" font-weight="700" '
+        f'font-family="Inter, system-ui, sans-serif">1 km cells</text>'
+    )
+    arrow_7_to_8 = (
+        f'<line x1="{step7_x + TILE_W/2}" y1="{step7_y + TILE_H + 2}" '
+        f'x2="{step7_x + TILE_W/2}" y2="{callout_y - 6}" '
+        f'stroke="#334155" stroke-width="2.2" marker-end="url(#arrow)"/>'
+    )
+
+    # ── Steps 10 & 11 stacked below step 9 (green)
+    step10_x = step9_x
+    step10_y = step9_y + TILE_H + 70
+    step10 = tile_svg(step10_x, step10_y, TILE_W, TILE_H, "10", "📄",
+                      ["Export outputs"], "CSV • GeoJSON • summary files", GREEN)
+    arrow_9_to_10 = (
+        f'<line x1="{step9_x + TILE_W/2}" y1="{step9_y + TILE_H + 2}" '
+        f'x2="{step10_x + TILE_W/2}" y2="{step10_y - 6}" '
+        f'stroke="#15803D" stroke-width="2.4" marker-end="url(#arrow-green)"/>'
+    )
+    step11_x = step10_x
+    step11_y = step10_y + TILE_H + 60
+    step11 = tile_svg(step11_x, step11_y, TILE_W, TILE_H, "11", "🔄",
+                      ["Update", "latest-run pointer"], "", GREEN)
+    arrow_10_to_11 = (
+        f'<line x1="{step10_x + TILE_W/2}" y1="{step10_y + TILE_H + 2}" '
+        f'x2="{step11_x + TILE_W/2}" y2="{step11_y - 6}" '
+        f'stroke="#15803D" stroke-width="2.4" marker-end="url(#arrow-green)"/>'
+    )
+
+    # ── Step 12: orange container with 4 sub-tiles
+    cont_x, cont_y = 280, step11_y + 40
+    cont_w, cont_h = 1050, 240
+    container = (
+        f'<rect x="{cont_x}" y="{cont_y}" rx="20" ry="20" '
+        f'width="{cont_w}" height="{cont_h}" fill="#FFF7ED" '
+        f'stroke="#FB923C" stroke-width="2.6"/>'
+        # Header
+        f'<text x="{cont_x + 40}" y="{cont_y + 42}" font-size="26">🖥️</text>'
+        f'<circle cx="{cont_x + 92}" cy="{cont_y + 34}" r="15" fill="#EA580C"/>'
+        f'<text x="{cont_x + 92}" y="{cont_y + 39}" text-anchor="middle" fill="#fff" '
+        f'font-size="13" font-weight="800" font-family="Inter, system-ui, sans-serif">12</text>'
+        f'<text x="{cont_x + 118}" y="{cont_y + 41}" fill="#0F172A" font-size="18" '
+        f'font-weight="800" font-family="Inter, system-ui, sans-serif">Conference dashboard</text>'
+    )
+    sub_tiles = [
+        ("🗺️", ["Latest", "prediction map"]),
+        ("📈", ["Prospective", "validation metrics"]),
+        ("⚗️", ["Research", "diagnostics"]),
+        ("📊", ["Active-fire", "table"]),
+    ]
+    sub_w, sub_h, sub_gap = 220, 130, 28
+    sub_total = 4 * sub_w + 3 * sub_gap
+    sub_start_x = cont_x + (cont_w - sub_total) / 2
+    sub_y = cont_y + 80
+    sub_svg = ""
+    branch_svg = ""
+    parent_x = cont_x + cont_w / 2
+    parent_y = cont_y + 70
+    for i, (icon, lines) in enumerate(sub_tiles):
+        sx = sub_start_x + i * (sub_w + sub_gap)
+        sub_svg += (
+            f'<rect x="{sx}" y="{sub_y}" rx="14" ry="14" width="{sub_w}" height="{sub_h}" '
+            f'fill="#FFFFFF" stroke="#FB923C" stroke-width="2"/>'
+            f'<text x="{sx + 30}" y="{sub_y + 50}" font-size="26">{icon}</text>'
+            f'<text x="{sx + 70}" y="{sub_y + 55}" fill="#0F172A" font-size="14" '
+            f'font-weight="700" font-family="Inter, system-ui, sans-serif">{lines[0]}</text>'
+            f'<text x="{sx + 70}" y="{sub_y + 75}" fill="#0F172A" font-size="14" '
+            f'font-weight="700" font-family="Inter, system-ui, sans-serif">{lines[1]}</text>'
+        )
+        # Branch line from header center down to each sub-tile top
+        cx = sx + sub_w / 2
+        branch_svg += (
+            f'<path d="M {parent_x} {parent_y} L {parent_x} {sub_y - 12} '
+            f'L {cx} {sub_y - 12} L {cx} {sub_y - 2}" '
+            f'fill="none" stroke="#EA580C" stroke-width="2" marker-end="url(#arrow-orange)"/>'
+        )
+
+    # Dashed purple arrow: step 4 → step 12
+    s4_x = positions[3][0] + TILE_W / 2
+    s4_y = positions[3][1] + TILE_H
+    purple_arrow = (
+        f'<path d="M {s4_x} {s4_y + 2} L {s4_x} {cont_y - 40} L {cont_x + 80} {cont_y - 40} '
+        f'L {cont_x + 80} {cont_y - 4}" fill="none" stroke="#7C3AED" stroke-width="2.2" '
+        f'stroke-dasharray="8 6" marker-end="url(#arrow-purple)"/>'
+    )
+
+    # Green arrow: step 11 → step 12 (right side into container)
+    s11_cx = step11_x + TILE_W / 2
+    s11_cy = step11_y + TILE_H / 2
+    green_arrow = (
+        f'<path d="M {step11_x - 6} {s11_cy} L {cont_x + cont_w + 30} {s11_cy} '
+        f'L {cont_x + cont_w + 30} {cont_y + cont_h / 2} L {cont_x + cont_w + 4} '
+        f'{cont_y + cont_h / 2}" fill="none" stroke="#15803D" stroke-width="2.4" '
+        f'marker-end="url(#arrow-green)"/>'
+    )
+
+    # Assemble SVG
+    svg_w = X0 + len(top_row) * (TILE_W + GAP) + 40
+    svg_h = step11_y + TILE_H + 320
+
+    svg = f"""
+    <svg viewBox="0 0 {svg_w} {svg_h}" xmlns="http://www.w3.org/2000/svg"
+         style="width:100%;height:auto;background:#FFFFFF;border-radius:8px;">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+        </marker>
+        <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#15803D"/>
+        </marker>
+        <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#7C3AED"/>
+        </marker>
+        <marker id="arrow-orange" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#EA580C"/>
+        </marker>
+      </defs>
+
+      <!-- Title -->
+      <text x="{svg_w/2}" y="42" text-anchor="middle"
+            fill="#0F172A" font-size="30" font-weight="900"
+            font-family="Inter, system-ui, sans-serif">
+        Operational Flow of the Live Wildfire Ignition-Risk System
+      </text>
+
+      <!-- Top row tiles + arrows -->
+      {tiles_svg}
+      {arrows_svg}
+
+      <!-- Step 8 callout + arrow from 7 -->
+      {arrow_7_to_8}
+      {callout}
+
+      <!-- Steps 10, 11 (green) + arrows -->
+      {arrow_9_to_10}
+      {step10}
+      {arrow_10_to_11}
+      {step11}
+
+      <!-- Dashed purple arrow 4 → 12 -->
+      {purple_arrow}
+
+      <!-- Green arrow 11 → 12 -->
+      {green_arrow}
+
+      <!-- Step 12 container + branches + sub-tiles -->
+      {container}
+      {branch_svg}
+      {sub_svg}
+
+      <!-- Footer caption -->
+      <text x="{svg_w/2}" y="{svg_h - 24}" text-anchor="middle"
+            fill="#64748B" font-size="14" font-style="italic"
+            font-family="Inter, system-ui, sans-serif">
+        Dashboard is read-only: it displays saved pipeline outputs and does not run inference live.
+      </text>
+    </svg>
+    """
+
+    # Hover layer only. This keeps the SVG flowchart style/layout unchanged.
+    flow_details = {str(step["number"]): step["detail"] for step in FLOW_STEPS}
+    flow_titles = {str(step["number"]): step["title"] for step in FLOW_STEPS}
+
+    def html_escape(value) -> str:
+        return (
+            str(value)
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#39;")
+        )
+
+    def hotspot(num, x, y, w, h):
+        detail = html_escape(flow_details.get(str(num), ""))
+        title = html_escape(flow_titles.get(str(num), f"Step {num}"))
+
+        if not detail:
+            return ""
+
+        left = 100.0 * x / svg_w
+        top = 100.0 * y / svg_h
+        width = 100.0 * w / svg_w
+        height = 100.0 * h / svg_h
+
+        return f"""
+        <div class="flow-hotspot"
+             style="left:{left:.4f}%; top:{top:.4f}%; width:{width:.4f}%; height:{height:.4f}%;">
+            <div class="flow-popover">
+                <div class="flow-popover-title">{title}</div>
+                <div class="flow-popover-body">{detail}</div>
+            </div>
+        </div>
+        """
+
+    hotspots = []
+
+    # Top-row tiles: steps 1,2,3,4,5,6,7,9.
+    for i, (num, icon, lines, sub, theme) in enumerate(top_row):
+        x, y = positions[i]
+        hotspots.append(hotspot(num, x, y, TILE_W, TILE_H))
+
+    # Step 8 dashed candidate-cell callout.
+    hotspots.append(hotspot("8", callout_x, callout_y, callout_w, callout_h))
+
+    # Steps 10 and 11.
+    hotspots.append(hotspot("10", step10_x, step10_y, TILE_W, TILE_H))
+    hotspots.append(hotspot("11", step11_x, step11_y, TILE_W, TILE_H))
+
+    # Step 12 dashboard container.
+    hotspots.append(hotspot("12", cont_x, cont_y, cont_w, cont_h))
+
+    hotspots_html = "".join(hotspots)
+
+    flow_html = f"""
     <style>
-        .flow-wrapper {{
-            font-family: 'IBM Plex Sans', -apple-system, sans-serif;
-            padding: 18px 4px 30px 4px;
-            color: #fafafa;
+        .flow-shell {{
+            background: #FFFFFF;
+            padding: 20px 16px;
+            overflow: visible;
         }}
-        .flow-title {{
-            font-family: 'Chivo', sans-serif;
-            text-align: center; font-size: 28px; font-weight: 900;
-            letter-spacing: -0.02em; color: #fafafa; margin-bottom: 6px;
-        }}
-        .flow-subtitle {{
-            text-align: center; font-size: 12px; color: #71717A;
-            font-family: 'JetBrains Mono', monospace; letter-spacing: 0.14em;
-            text-transform: uppercase; margin-bottom: 24px;
-        }}
-        .stage-band {{
-            display: flex; align-items: stretch; gap: 14px;
-            margin-bottom: 14px; padding: 10px 12px;
-            border-left: 3px solid var(--band);
-            background: rgba(255,255,255,0.02);
-        }}
-        .stage-label {{
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 10px; letter-spacing: 0.28em;
-            color: var(--band); writing-mode: vertical-rl;
-            transform: rotate(180deg); padding: 6px 4px;
-            font-weight: 700;
-        }}
-        .stage-cards {{
-            display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr));
-            gap: 12px; flex: 1;
-        }}
-        .flow-card {{
+
+        .flow-canvas {{
             position: relative;
-            border: 1px solid var(--accent);
-            background: #121214; padding: 14px 12px;
-            min-height: 92px; text-align: left;
-            transition: transform 0.15s, box-shadow 0.15s;
+            width: 100%;
+            overflow: visible;
+        }}
+
+        .flow-canvas svg {{
+            display: block;
+            width: 100%;
+            height: auto;
+        }}
+
+        .flow-hotspot {{
+            position: absolute;
+            background: rgba(255,255,255,0);
             cursor: help;
+            z-index: 10;
+            overflow: visible;
         }}
-        .flow-card:hover {{
-            transform: translateY(-3px);
-            box-shadow: 0 10px 26px rgba(0,0,0,0.6);
-            z-index: 30;
+
+        .flow-hotspot:hover {{
+            outline: 2px solid rgba(255,87,34,0.28);
+            outline-offset: 3px;
+            border-radius: 14px;
         }}
-        .step-badge {{
-            width: 24px; height: 24px;
-            background: var(--accent); color: #fff;
-            display: inline-flex; align-items: center; justify-content: center;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 11px; font-weight: 800; margin-bottom: 8px;
+
+        .flow-popover {{
+            position: absolute;
+            left: 50%;
+            top: 100%;
+            transform: translateX(-50%) translateY(10px);
+            width: 310px;
+            max-width: 340px;
+            background: #0F172A;
+            color: #F8FAFC;
+            border: 1px solid rgba(255,87,34,0.75);
+            border-left: 5px solid #FF5722;
+            border-radius: 8px;
+            box-shadow: 0 18px 42px rgba(15,23,42,0.38);
+            padding: 12px 14px;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
+            z-index: 999;
+            font-family: Inter, system-ui, sans-serif;
         }}
-        .step-title {{
-            font-family: 'Chivo', sans-serif; font-size: 13px;
-            font-weight: 700; line-height: 1.25; color: #fafafa;
+
+        .flow-popover::before {{
+            content: "";
+            position: absolute;
+            top: -9px;
+            left: 50%;
+            transform: translateX(-50%);
+            border-left: 9px solid transparent;
+            border-right: 9px solid transparent;
+            border-bottom: 9px solid #FF5722;
         }}
-        .tooltip-box {{
-            display: none; position: absolute;
-            left: 50%; top: 102%; transform: translateX(-50%);
-            width: 260px; background: #0a0a0a; color: #fafafa;
-            border: 1px solid var(--accent);
-            padding: 12px 14px; font-size: 12px; line-height: 1.4;
-            font-family: 'IBM Plex Sans', sans-serif;
+
+        .flow-hotspot:hover .flow-popover {{
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(-50%) translateY(0);
         }}
-        .flow-card:hover .tooltip-box {{ display: block; }}
-        .flow-footer {{
-            margin-top: 18px; text-align: center;
-            color: #52525B; font-size: 11px;
-            font-family: 'JetBrains Mono', monospace;
-            letter-spacing: 0.18em; text-transform: uppercase;
+
+        .flow-popover-title {{
+            color: #FFB088;
+            font-size: 12px;
+            font-weight: 900;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 7px;
         }}
-        @media (max-width: 1100px) {{
-            .stage-cards {{ grid-template-columns: repeat(2, 1fr); }}
+
+        .flow-popover-body {{
+            color: #F8FAFC;
+            font-size: 12px;
+            line-height: 1.45;
         }}
     </style>
-    <div class="flow-wrapper">
-      <div class="flow-title">Operational Flow · Live Wildfire Ignition-Risk System</div>
-      <div class="flow-subtitle">Hover any step for detail</div>
-      {''.join(bands_html)}
-      <div class="flow-footer">Read-only dashboard · saved pipeline outputs only</div>
+
+    <div class="flow-shell">
+        <div class="flow-canvas">
+            {svg}
+            {hotspots_html}
+        </div>
     </div>
     """
-    components.html(html, height=860, scrolling=True)
+
+    components.html(
+        flow_html,
+        height=int(svg_h * 0.78) + 140,
+        scrolling=True,
+    )
+
+
 
 
 # ----------------------------------------------------------------------------
@@ -912,9 +1640,9 @@ def main() -> None:
     st.markdown("&nbsp;")
 
     # Tabs
-    tab_flow, tab_3d, tab_map, tab_validation, tab_diagnostics, tab_active = st.tabs([
+    tab_flow, tab_map, tab_validation, tab_diagnostics, tab_active = st.tabs([
         "Operational flow",
-        "3D risk surface",
+        
         "Latest map",
         "Prospective validation",
         "Research diagnostics",
@@ -924,13 +1652,9 @@ def main() -> None:
     with tab_flow:
         render_interactive_operational_flow()
 
-    with tab_3d:
-        st.subheader("3D ignition-risk density surface")
-        render_3d_risk_surface(run_id)
-
     with tab_map:
         st.subheader("Latest model output map")
-        render_map(run_id, validation_df, active_fires, max_features=max_map_features)
+        render_map(run_id, validation_df, active_fires, model_b, max_features=max_map_features)
 
     with tab_validation:
         render_validation_summary(validation_df)

@@ -8,6 +8,15 @@ small public bundle and removes internal machine paths such as ``npz_path``.
 Default output:
     public_dashboard_bundle/
 
+Recommended public deployment layout:
+    /mnt/work/wildfire/25m/
+      wildfire-ignition-prediction-alberta/   # private inference repo
+      wildfire-dashboard-public/              # public dashboard repo
+
+Example sibling export:
+    python scripts/export_public_dashboard_bundle.py \
+      --output-dir ../wildfire-dashboard-public/public_dashboard_bundle
+
 The exported bundle can be pushed to a public dashboard repository or served by
 Streamlit Cloud / GitHub Pages / another public host. It should not include raw
 rasters, NPZ patches, model weights, API keys, or university filesystem paths.
@@ -32,8 +41,11 @@ RUNS_ROOT = Path("results/runs")
 VALIDATION_LOG = Path("results/validation/prospective_validation_log.csv")
 ACTIVE_FIRES = Path("data/validation/alberta_activefires_current.csv")
 
-# Columns that should not be published because they expose local filesystem
-# structure, generated patch locations, or internal processing details.
+# The output directory is deleted and recreated on every export. Requiring this
+# directory name prevents accidental deletion of a repository root or parent
+# folder when exporting to a sibling public repo.
+REQUIRED_OUTPUT_DIR_NAME = "public_dashboard_bundle"
+
 SENSITIVE_EXACT_COLUMNS = {
     "npz_path",
     "patch_path",
@@ -54,8 +66,6 @@ SENSITIVE_NAME_FRAGMENTS = (
     "path",
 )
 
-# Optional diagnostics produced by the validation scripts. These are useful for
-# the conference dashboard but should still be cleaned before publishing.
 OPTIONAL_VALIDATION_FILES = [
     Path("results/validation/model_a_threshold_sweep_summary.csv"),
     Path("results/validation/prospective_ranking_diagnostic_summary.csv"),
@@ -95,12 +105,33 @@ def sha256_file(path: Path) -> str:
 
 
 def ensure_safe_output_dir(path: Path) -> None:
+    """Validate output directory before deleting/recreating it.
+
+    The public bundle may live outside the private repo, usually as a sibling
+    folder inside a separate public dashboard repository. Because reset_output_dir
+    deletes this directory, we only allow deletion of a directory explicitly named
+    ``public_dashboard_bundle``.
+    """
     resolved = path.resolve()
     cwd = Path.cwd().resolve()
+
+    if path.name != REQUIRED_OUTPUT_DIR_NAME:
+        raise ValueError(
+            "Refusing to reset output directory because its final folder name is "
+            f"not {REQUIRED_OUTPUT_DIR_NAME!r}: {path}. Use a path like "
+            "../wildfire-dashboard-public/public_dashboard_bundle"
+        )
+
     if resolved == cwd:
         raise ValueError("Refusing to use repository root as output directory")
-    if cwd not in resolved.parents:
-        raise ValueError(f"Output directory must be inside the repository: {path}")
+
+    protected_roots = {Path("/").resolve(), Path.home().resolve()}
+    for protected in protected_roots:
+        if resolved == protected:
+            raise ValueError(f"Refusing to use protected output directory: {resolved}")
+
+    if resolved.exists() and not resolved.is_dir():
+        raise ValueError(f"Output path exists but is not a directory: {resolved}")
 
 
 def reset_output_dir(path: Path) -> None:
@@ -308,8 +339,6 @@ def export_bundle(output_dir: Path) -> tuple[str, list[ExportedFile], list[str]]
         exported_file = export_file(src, latest_public_run_dir / filename)
         exported.append(exported_file)
 
-        # Also keep a run-id version for reproducibility. Copy the cleaned output
-        # rather than cleaning twice so hashes remain predictable for latest/.
         named_dst = named_public_run_dir / filename
         named_dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(latest_public_run_dir / filename, named_dst)
@@ -334,7 +363,12 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="Directory where the public-safe dashboard bundle will be written.",
+        help=(
+            "Directory where the public-safe dashboard bundle will be written. "
+            "The final folder name must be public_dashboard_bundle. A sibling "
+            "public repo path is recommended, e.g. "
+            "../wildfire-dashboard-public/public_dashboard_bundle"
+        ),
     )
     return parser.parse_args()
 

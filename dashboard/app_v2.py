@@ -53,18 +53,6 @@ HARD_NEGATIVE_SUMMARY_CSV = VALIDATION_ROOT / "prospective_hard_negative_summary
 DISTANCE_THRESHOLDS_M = [1000, 5000, 10000, 25000]
 
 # Alberta map display bounds.
-ALBERTA_BOUNDS = [[48.85, -120.35], [60.15, -109.45]]
-ALBERTA_CENTER = [54.7, -115.0]
-ALBERTA_START_ZOOM = 6
-ALBERTA_MIN_ZOOM = 6
-ALBERTA_MAX_ZOOM = 18
-
-# Alberta display bounds with a small buffer.
-# Used to keep the map focused on Alberta while still allowing zoom-in.
-ALBERTA_BOUNDS = [[48.85, -120.35], [60.15, -109.45]]
-ALBERTA_CENTER = [54.7, -115.0]
-ALBERTA_MIN_ZOOM = 5
-ALBERTA_MAX_ZOOM = 18
 
 st.set_page_config(
     page_title="Alberta Wildfire Ignition Risk Dashboard",
@@ -420,17 +408,25 @@ def prepare_map_cells(run_dir: Path) -> gpd.GeoDataFrame:
     return cells.to_crs("EPSG:4326")
 
 
+ALBERTA_BOUNDS = [[48.85, -120.35], [60.15, -109.45]]
+ALBERTA_CENTER = [54.7, -115.0]
+ALBERTA_MIN_ZOOM = 5  # Set to 6 to tightly wrap the province borders on wide layouts
+ALBERTA_MAX_ZOOM = 18
+
 def create_bounded_alberta_map():
-    """Create an OpenStreetMap map constrained to Alberta."""
+    """Create an OpenStreetMap map strictly locked and constrained to Alberta."""
     m = folium.Map(
         location=ALBERTA_CENTER,
-        zoom_start=ALBERTA_START_ZOOM,
         tiles="OpenStreetMap",
         min_zoom=ALBERTA_MIN_ZOOM,
         max_zoom=ALBERTA_MAX_ZOOM,
         control_scale=True,
         prefer_canvas=True,
+        max_bounds=True,
     )
+    
+    # Force the initial viewport window to tightly frame the boundary box
+    m.fit_bounds(ALBERTA_BOUNDS)
 
     folium.Rectangle(
         bounds=ALBERTA_BOUNDS,
@@ -445,36 +441,31 @@ def create_bounded_alberta_map():
     map_name = m.get_name()
     bounds_js = "[[48.85, -120.35], [60.15, -109.45]]"
 
-    m.get_root().script.add_child(
-        folium.Element(
-            f"""
-            setTimeout(function() {{
-                var map = {map_name};
-                var bounds = L.latLngBounds({bounds_js});
+    # Strict boundary enforcement script to eliminate dragging or scrolling out
+    custom_js = f"""
+    setTimeout(function() {{
+        var map = {map_name};
+        var bounds = L.latLngBounds({bounds_js});
 
-                map.setMaxBounds(bounds);
-                map.options.maxBoundsViscosity = 1.0;
-                map.setMinZoom({ALBERTA_MIN_ZOOM});
-                map.setMaxZoom({ALBERTA_MAX_ZOOM});
+        map.setMaxBounds(bounds);
+        map.options.maxBoundsViscosity = 1.0; // Removes the bouncy/elastic drag margin
+        map.setMinZoom({ALBERTA_MIN_ZOOM});
 
-                if (map.getZoom() < {ALBERTA_MIN_ZOOM}) {{
-                    map.setZoom({ALBERTA_MIN_ZOOM});
-                }}
+        // Ensure current zoom isn't accidentally broken during st_folium mounting
+        if (map.getZoom() < {ALBERTA_MIN_ZOOM}) {{
+            map.setZoom({ALBERTA_MIN_ZOOM});
+        }}
 
-                map.on('zoomend', function() {{
-                    if (map.getZoom() < {ALBERTA_MIN_ZOOM}) {{
-                        map.setZoom({ALBERTA_MIN_ZOOM});
-                    }}
-                    map.panInsideBounds(bounds, {{animate: false}});
-                }});
-
-                map.on('dragend moveend', function() {{
-                    map.panInsideBounds(bounds, {{animate: false}});
-                }});
-            }}, 500);
-            """
-        )
-    )
+        // Catch map adjustments instantly and snap back to safety bounds
+        map.on('zoomend dragend moveend', function() {{
+            if (map.getZoom() < {ALBERTA_MIN_ZOOM}) {{
+                map.setZoom({ALBERTA_MIN_ZOOM});
+            }}
+            map.panInsideBounds(bounds, {{animate: false}});
+        }});
+    }}, 200);
+    """
+    m.get_root().script.add_child(folium.Element(custom_js))
 
     return m
 
@@ -806,19 +797,19 @@ def render_map(run_id, validation_df, active_fires, model_b, max_features):
     if run_id:
         cells = prepare_map_cells(RUNS_ROOT / run_id)
         add_model_a_probability_heatmap(m, cells, max_features=max_features)
-        add_candidate_cells_to_map(m, cells, max_features=max_features)
+        #add_candidate_cells_to_map(m, cells, max_features=max_features)
         add_model_b_candidate_probability_heatmap(m, model_b, max_features=max_features)
-        add_model_b_candidate_grid_to_map(m, model_b, max_features=max_features)
+        #add_model_b_candidate_grid_to_map(m, model_b, max_features=max_features)
         add_probability_legend(m)
 
     add_fire_points_to_map(m, active_fires, "Current active fires", "#7C3AED", radius=4)
-    add_fire_points_to_map(
-        m,
-        validated_fires(validation_df),
-        "Validated prospective fires + 25 km buffer",
-        "#15803D",
-        radius=6,
-    )
+    # add_fire_points_to_map(
+    #     m,
+    #     validated_fires(validation_df),
+    #     "Validated prospective fires + 25 km buffer",
+    #     "#15803D",
+    #     radius=6,
+    # )
 
     folium.LayerControl(collapsed=False).add_to(m)
 

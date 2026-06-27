@@ -7,12 +7,16 @@
 #   2. Validate newly observed fires against prediction snapshots that existed
 #      before each fire's reported start time.
 #   3. Generate a fresh full-province prediction snapshot for the next cycle.
+#   4. Optionally publish a public-safe dashboard bundle.
 #
 # Safe poll-only smoke test:
 #   POLL_ONLY=1 bash scripts/run_three_hour_validation_cycle.sh
 #
 # Full manual cycle:
 #   bash scripts/run_three_hour_validation_cycle.sh
+#
+# Full manual cycle with public dashboard publish:
+#   PUBLISH_PUBLIC_DASHBOARD=1 bash scripts/run_three_hour_validation_cycle.sh
 
 set -Eeuo pipefail
 
@@ -22,6 +26,8 @@ cd "${REPO_ROOT}"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 POLL_ONLY="${POLL_ONLY:-0}"
+PUBLISH_PUBLIC_DASHBOARD="${PUBLISH_PUBLIC_DASHBOARD:-0}"
+PUBLISH_PUBLIC_DASHBOARD_FAILS_CYCLE="${PUBLISH_PUBLIC_DASHBOARD_FAILS_CYCLE:-0}"
 OPEN_METEO_MIN_REQUEST_INTERVAL_SECONDS="${OPEN_METEO_MIN_REQUEST_INTERVAL_SECONDS:-1.0}"
 export OPEN_METEO_MIN_REQUEST_INTERVAL_SECONDS
 
@@ -84,11 +90,39 @@ require_file() {
   fi
 }
 
+publish_public_dashboard() {
+  if [[ "${PUBLISH_PUBLIC_DASHBOARD}" != "1" ]]; then
+    echo "Public dashboard publish skipped. Set PUBLISH_PUBLIC_DASHBOARD=1 to enable."
+    return 0
+  fi
+
+  local publish_script="scripts/publish_public_dashboard_bundle.sh"
+  if [[ ! -f "${publish_script}" ]]; then
+    echo "Warning: public dashboard publish script not found: ${publish_script}"
+    if [[ "${PUBLISH_PUBLIC_DASHBOARD_FAILS_CYCLE}" == "1" ]]; then
+      exit 1
+    fi
+    return 0
+  fi
+
+  echo "Publishing public dashboard bundle..."
+  if bash "${publish_script}"; then
+    echo "Public dashboard publish completed."
+  else
+    local publish_exit_code=$?
+    echo "Warning: public dashboard publish failed with exit code ${publish_exit_code}."
+    if [[ "${PUBLISH_PUBLIC_DASHBOARD_FAILS_CYCLE}" == "1" ]]; then
+      exit "${publish_exit_code}"
+    fi
+  fi
+}
+
 echo "============================================================"
 echo "Wildfire prospective validation cycle"
 echo "Cycle UTC: ${CYCLE_TIMESTAMP}"
 echo "Repository: ${REPO_ROOT}"
 echo "Poll only: ${POLL_ONLY}"
+echo "Publish public dashboard: ${PUBLISH_PUBLIC_DASHBOARD}"
 echo "Open-Meteo request interval: ${OPEN_METEO_MIN_REQUEST_INTERVAL_SECONDS} seconds"
 echo "Log: ${LOG_FILE}"
 echo "============================================================"
@@ -123,6 +157,7 @@ require_file "${MODEL_A_STATS}"
 
 if [[ "${POLL_ONLY}" == "1" ]]; then
   echo "Poll-only cycle completed. No prediction run was started."
+  publish_public_dashboard
   exit 0
 fi
 
@@ -245,4 +280,5 @@ printf '%s\n' "${RUN_ID}" > "${LATEST_RUN_FILE}"
 
 echo "Prediction snapshot completed: ${RUN_ID}"
 echo "Latest-run pointer: ${LATEST_RUN_FILE}"
+publish_public_dashboard
 echo "Cycle log: ${LOG_FILE}"
